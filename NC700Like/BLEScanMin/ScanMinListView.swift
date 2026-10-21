@@ -38,7 +38,7 @@ final class ScanMinService: NSObject, ObservableObject, CBCentralManagerDelegate
         if central.state == .poweredOn { scan() }
     }
 
-    private func stateName(_ state: CBCentralManagerState) -> String {
+    private func stateName(_ state: CBManagerState) -> String {
         switch state {
         case .poweredOn: return "poweredOn"
         case .poweredOff: return "poweredOff"
