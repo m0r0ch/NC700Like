@@ -192,7 +192,7 @@ final class BLEService: NSObject, ObservableObject {
     private func startConnect() {
         cancelReconnect()
         stopScan()
-        guard central.state == .poweredOn, central.authorization == .allowed else {
+        guard central.state == .poweredOn, central.authorization == .allowedAlways else {
             updateStateDiagnostics()
             return
         }
@@ -214,7 +214,7 @@ final class BLEService: NSObject, ObservableObject {
 
     /// REQ A-5: 最初からサービス指定なし・AllowDuplicates有効の広域スキャン。
     private func startUnfilteredScan() {
-        guard central.state == .poweredOn, central.authorization == .allowed else { return }
+        guard central.state == .poweredOn, central.authorization == .allowedAlways else { return }
         scanning = true
         phase = .scanning
         appendLog(kind: .connection, hex: nil, note: "広域スキャン開始(重複許可・全デバイス照会)")
@@ -268,7 +268,7 @@ final class BLEService: NSObject, ObservableObject {
     private func updateStateDiagnostics() {
         authorizationText = {
             switch central.authorization {
-            case .allowed: return "許可 ✓"
+            case .allowedAlways: return "許可 ✓"
             case .denied: return "拒否(設定→プライバシーとセキュリティ→Bluetooth)"
             case .notDetermined: return "未確認(許可ダイアログ未応答)"
             case .restricted: return "制限中(画面時間/MDM 等)"
@@ -350,7 +350,7 @@ extension BLEService: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
         case .poweredOn:
-            guard central.authorization == .allowed else {
+            guard central.authorization == .allowedAlways else {
                 phase = .idle(device: "Bluetooth の利用が許可されていません(設定→NC700Like→Bluetooth)")
                 appendLog(kind: .error, hex: nil, note: "state=poweredOn だが authorization=拒否(スキャンしない)")
                 updateStateDiagnostics()
