@@ -57,7 +57,7 @@ public struct ButtonEventDetector: Sendable {
 
     /// stateOffsetInBytes の位置から stateLengthInBytes バイトを取り出す。
     /// 既定設定では value[17..<19](0始まり。設計書の「17番目と18番目」)。
-    func extractState(from value: [UInt8]) -> [UInt8]? {
+    public func extractState(from value: [UInt8]) -> [UInt8]? {
         let offset = configuration.stateOffsetInBytes
         let length = configuration.stateLengthInBytes
         guard value.count >= offset + length else { return nil }

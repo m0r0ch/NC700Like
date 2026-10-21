@@ -26,21 +26,26 @@ struct BLELogEntry: Identifiable, Equatable {
 
 enum BLEConnectionPhase: Equatable {
     case idle(device: String?)
-    case scanning(device: String?)
-    case connecting(device: String?)
-    case connected(device: String?)
-    case subscribed(device: String?)
-    case failed(device: String?)
+    case scanning
+    case connecting(device: String)
+    case connected(device: String)
+    case subscribed(device: String)
+    case failed(device: String)
 
     var label: String {
-        let base = device == nil ? "" : "\(device!) "
         switch self {
-        case .idle(let d):          return (d.map { "\($0)" } ?? "Bluetooth 初期化中")
-        case .scanning:             return "スキャン中… (\(base)を探しています)"
-        case .connecting:           return "\(base)接続中…"
-        case .connected:            return "\(base)接続 ✓(購読準備中)"
-        case .subscribed:           return "\(base)接続 ✓ 購読中"
-        case .failed:               return "\(base)接続失敗"
+        case .idle(let d):
+            return d ?? "Bluetooth 初期化中"
+        case .scanning:
+            return "スキャン中… Bose NC 700 を探しています"
+        case .connecting(let d):
+            return "\(d) 接続中…"
+        case .connected(let d):
+            return "\(d) 接続 ✓(購読準備中)"
+        case .subscribed(let d):
+            return "\(d) 接続 ✓ 購読中"
+        case .failed(let d):
+            return "\(d) 接続失敗"
         }
     }
 }
@@ -123,7 +128,7 @@ final class BLEService: NSObject, ObservableObject {
         }
 
         // 見つからなければスキャン
-        setPhase { _ in .scanning(device: nil) }
+        setPhase(.scanning)
         appendLog(kind: .connection, hex: nil, note: "スキャン開始")
         central.scanForPeripherals(
             withServices: [serviceUUID],
@@ -138,7 +143,7 @@ final class BLEService: NSObject, ObservableObject {
         p.delegate = self
         awaitingInitialValue = false
         characteristic = nil
-        setPhase { _ in .connecting(device: displayName(of: p)) }
+        setPhase(.connecting(device: displayName(of: p)))
         appendLog(kind: .connection, hex: nil, note: "接続中: \(displayName(of: p)) \(p.identifier.uuidString.prefix(8))")
         central.connect(p)
     }
@@ -174,10 +179,9 @@ final class BLEService: NSObject, ObservableObject {
         }
     }
 
-    private func setPhase(_ transform: (BLEConnectionPhase) -> BLEConnectionPhase) {
+    private func setPhase(_ newPhase: BLEConnectionPhase) {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.phase = transform(self.phase)
+            self?.phase = newPhase
         }
     }
 
@@ -203,18 +207,18 @@ extension BLEService: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
         case .poweredOn:
-            setPhase { _ in .idle(device: nil) }
+            setPhase(.idle(device: nil))
             startConnect()
         case .poweredOff:
-            setPhase { _ in .idle(device: "Bluetooth オフ — 設定でオンにしてください") }
+            setPhase(.idle(device: "Bluetooth オフ — 設定でオンにしてください"))
         case .unauthorized:
-            setPhase { _ in .idle(device: "Bluetooth 利用が許可されていません") }
+            setPhase(.idle(device: "Bluetooth 利用が許可されていません"))
         case .unsupported:
-            setPhase { _ in .idle(device: "この端末ではBluetooth LEを利用できません") }
+            setPhase(.idle(device: "この端末ではBluetooth LEを利用できません"))
         case .resetting, .unknown:
-            setPhase { _ in .idle(device: "Bluetooth 初期化中") }
+            setPhase(.idle(device: "Bluetooth 初期化中"))
         @unknown default:
-            setPhase { _ in .idle(device: "Bluetooth 状態不明") }
+            setPhase(.idle(device: "Bluetooth 状態不明"))
         }
     }
 
@@ -250,7 +254,7 @@ extension BLEService: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         characteristic = nil
         appendLog(kind: .connection, hex: nil, note: "切断: \(error?.localizedDescription ?? "正常")")
-        setPhase { .idle(device: "切断 — 再接続します") }
+        setPhase(.idle(device: "切断 — 再接続します"))
         scheduleReconnect(reason: "didDisconnect")
     }
 
@@ -310,7 +314,7 @@ extension BLEService: CBPeripheralDelegate {
             appendLog(kind: .error, hex: nil, note: "購読失敗: \(error.localizedDescription)")
             return
         }
-        setPhase { .subscribed(device: peripheral.name ?? "Bose NC 700") }
+        setPhase(.subscribed(device: peripheral.name ?? "Bose NC 700"))
         appendLog(kind: .connection, hex: nil, note: "購読開始: \(characteristic.uuid.uuidString)")
     }
 
