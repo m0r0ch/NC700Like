@@ -4,6 +4,11 @@ public struct DeviceConfiguration: Codable, Equatable, Sendable {
     public var serviceUUID: String
     public var characteristicUUID: String
 
+    /// FE03(音声受付)サービスとその通知特性。購読しないとボタン押下で
+    /// ヘッドホンがエラー音声を出し、主特性の値も変わらないことが実機で確認された。
+    public var audioServiceUUID: String
+    public var audioCharacteristicUUID: String
+
     /// 0始まりのオフセット。観測では値は19バイトで、末尾2バイト(index 17,18)が変化する
     public var stateOffsetInBytes: Int
     public var stateLengthInBytes: Int
@@ -15,6 +20,8 @@ public struct DeviceConfiguration: Codable, Equatable, Sendable {
     public init(
         serviceUUID: String = "FDD2",
         characteristicUUID: String = "7B61AD83-041C-4333-A0AB-EFB2AB7BDD43",
+        audioServiceUUID: String = "FE03",
+        audioCharacteristicUUID: String = "2BEEA05B-1879-4BB4-8A2F-72641F82420B",
         stateOffsetInBytes: Int = 17,
         stateLengthInBytes: Int = 2,
         pressStates: [[UInt8]] = [[0x00, 0x06], [0x10, 0x0E]],
@@ -23,6 +30,8 @@ public struct DeviceConfiguration: Codable, Equatable, Sendable {
     ) {
         self.serviceUUID = serviceUUID
         self.characteristicUUID = characteristicUUID
+        self.audioServiceUUID = audioServiceUUID
+        self.audioCharacteristicUUID = audioCharacteristicUUID
         self.stateOffsetInBytes = stateOffsetInBytes
         self.stateLengthInBytes = stateLengthInBytes
         self.pressStates = pressStates
@@ -57,6 +66,8 @@ extension DeviceConfiguration {
         var config = DeviceConfiguration.default
         if let v = partial.serviceUUID { config.serviceUUID = v }
         if let v = partial.characteristicUUID { config.characteristicUUID = v }
+        if let v = partial.audioServiceUUID { config.audioServiceUUID = v }
+        if let v = partial.audioCharacteristicUUID { config.audioCharacteristicUUID = v }
         if let v = partial.stateOffsetInBytes, v >= 0 { config.stateOffsetInBytes = v }
         if let v = partial.stateLengthInBytes, v > 0 { config.stateLengthInBytes = v }
         if let v = partial.pressStates {
@@ -80,6 +91,8 @@ extension DeviceConfiguration {
 public struct PartialDeviceConfiguration: Codable, Sendable {
     public var serviceUUID: String?
     public var characteristicUUID: String?
+    public var audioServiceUUID: String?
+    public var audioCharacteristicUUID: String?
     public var stateOffsetInBytes: Int?
     public var stateLengthInBytes: Int?
     public var pressStates: [[Int]]?
