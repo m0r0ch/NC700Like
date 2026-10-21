@@ -40,8 +40,8 @@ final class ButtonEventDetectorTests: XCTestCase {
         XCTAssertEqual(detector.process(value: pressed, at: 1.0), .press)
         XCTAssertEqual(detector.process(value: idle, at: 1.1), .ignored)
         XCTAssertEqual(detector.process(value: pressed, at: 1.2), .ignored)
-        // デバウンスの次に来た変化も「同じ状態の重複」となり発火しない
-        XCTAssertEqual(detector.process(value: idle, at: 1.5), .ignored)
+        // デバウンス(300ms)を過ぎた後の変化は、新たな押下として発火する
+        XCTAssertEqual(detector.process(value: idle, at: 1.5), .press)
         XCTAssertEqual(detector.process(value: pressed, at: 2.0), .press)
     }
 

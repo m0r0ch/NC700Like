@@ -37,12 +37,12 @@ public struct ButtonEventDetector: Sendable {
     @discardableResult
     public mutating func process(value: [UInt8], at timestamp: TimeInterval, isInitial: Bool = false) -> Output {
         guard let state = extractState(from: value) else { return .ignored }
-        defer { lastKnownState = state }
         guard let known = configuration.pressStates.first(where: { $0 == state }) else {
             // 未知の値は状態として扱わない。既知状態に戻ったときに
             // 「同状態の重複」として無視され続けるための挙動。
             return .ignored
         }
+        defer { lastKnownState = known }
         if isInitial {
             return .ignored
         }
