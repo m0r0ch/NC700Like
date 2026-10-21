@@ -16,20 +16,29 @@ struct BLELogEntry: Identifiable, Equatable {
         case notification
         case press
         case audio
+        case control
         case error
     }
 
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    /// REQ C-2: ミリ秒まで。
     var timeText: String {
-        date.formatted(date: .omitted, time: .standard)
+        Self.timeFormatter.string(from: date)
     }
 
     var kindText: String {
         switch kind {
         case .connection: return "接続"
         case .discovery: return "発見"
-        case .notification: return "受信"
+        case .notification: return "7B61"
         case .press: return "押下"
         case .audio: return "音声"
+        case .control: return "制御"
         case .error: return "ERROR"
         }
     }
@@ -63,20 +72,20 @@ struct BLECatalogService: Identifiable, Equatable {
 }
 
 enum BLEConnectionPhase: Equatable {
-    case idle(device: String?)
-    case scanning
-    case connecting(device: String)
-    case connected(device: String)
-    case subscribed(device: String)
+    case idle(device: String?)          // 再接続待ち/待機
+    case scanning                       // 広域スキャン中
+    case pending(device: String)        // 保留接続中=ヘッドホン待ち
+    case connected(device: String)      // 接続中
+    case subscribed(device: String)     // 接続中+両購読済み
 
     var label: String {
         switch self {
         case .idle(let d):
-            return d ?? "待機中"
+            return d ?? "待機中(再接続待ち)"
         case .scanning:
             return "スキャン中…(広域・全デバイス照会)"
-        case .connecting(let d):
-            return "\(d) 接続中…"
+        case .pending(let d):
+            return "\(d) 保留接続中(ヘッドホン待ち)"
         case .connected(let d):
             return "\(d) 接続 ✓(購読準備中)"
         case .subscribed(let d):
@@ -85,10 +94,12 @@ enum BLEConnectionPhase: Equatable {
     }
 }
 
-/// F1/F2 の BLE 層。実機調査の確定事実:
-/// - 広告は FDD2/FE26/FE03。名前 LE-Bose NC 700 Headphones。
+/// F1/F2/F6 の BLE 層。
+/// 実機の確定事実:
+/// - スキャン自体は一旦不調 NC700Like ではn dと Discover が呼ばれず、nRF Connect は見える。
+///   そのため接続は「保存識別子/システム接続取得/保留接続」を主経路とし、スキャンは補助。
 /// - FE03 の 2BEEA05B… を購読しないと押下でエラー音声になり 7B61 も変わらない。
-/// - 受付中は FE03 に音声が流れ続ける(保存/全表示はしない)。
+/// - 受付中は FE03 に音声が流れ続ける。制御(<64B)/音声(>=100B)で扱いを分ける。
 final class BLEService: NSObject, ObservableObject {
     static let restorationIdentifier = "jp.nc700like.BLEService"
 
@@ -104,26 +115,35 @@ final class BLEService: NSObject, ObservableObject {
     @Published private(set) var audioSessionCount = 0
     @Published private(set) var audioPacketCount = 0
 
-    /// 診断表示(REQ A-3)
     @Published private(set) var authorizationText = "—"
     @Published private(set) var stateText = "—"
     @Published private(set) var isScanning = false
+    /// REQ A-1: CoreBluetooth 自身の isScanning(自前フラグは isScanningLocal 相当)
+    @Published private(set) var isScanningCore = false
     @Published private(set) var discoverCallbackCount = 0
     @Published private(set) var lastDiscoveredName: String?
 
-    /// 広域スキャンの一覧(REQ A-5)
     @Published private(set) var discoveredDevices: [DiscoveredDevice] = []
-
-    /// 見つかった全サービスと全特性(REQ D)
     @Published private(set) var serviceCatalog: [BLECatalogService] = []
+
+    /// REQ B-9: どの経路で接続したか。
+    @Published private(set) var connectionRoute = "—"
+
+    /// REQ D-2: 直近の制御パケット末尾1バイト({ID}の置換元)。
+    @Published private(set) var lastControlTerminalHex: String?
+
+    /// REQ D-4: 自動送信のモード(画面のピッカーとバインド)。
+    @Published var autoSendMode: AutoSendMode = .off
 
     let configuration: DeviceConfiguration
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
+    private var writeCharacteristic: CBCharacteristic?
     private var detector = ButtonEventDetector()
     private var awaitingInitialValue = false
-    private var reconnectWorkItem: DispatchWorkItem?
+    private var awaitingConnection = false
+    private var retryWorkItem: DispatchWorkItem?
     private var refreshTimer: Timer?
     private let savedIdentifierKey = "savedPeripheralIdentifier"
 
@@ -132,9 +152,11 @@ final class BLEService: NSObject, ObservableObject {
     private var lastDiscoveryName: String?
     private var discoveredDict: [UUID: DiscoveredDevice] = [:]
     private var seenIdentifiers = Set<UUID>()
+    private var lastCoreScanningLogged: Bool?
 
     private var audioPacketTotal = 0
     private var audioLoggedInSession = 0
+    private var lastAutoSentPreset: DebugPreset?
 
     init(configuration: DeviceConfiguration = .load()) {
         self.configuration = configuration
@@ -145,8 +167,7 @@ final class BLEService: NSObject, ObservableObject {
             options: [CBCentralManagerOptionRestoreIdentifierKey: Self.restorationIdentifier]
         )
         detector = ButtonEventDetector(configuration: configuration)
-        // 診断値や発見一覧は1秒ごとに画面へ反映する。CoreBluetoothのdelegateは
-        // queue: nil でメインキューに届くため、内部集計はここでまとめて公開する。
+        // 診断値・発見一覧は1秒ごとに反映(A-1/A-3もこの間隔で観測)。
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.refreshDiagnostics()
         }
@@ -163,8 +184,26 @@ final class BLEService: NSObject, ObservableObject {
         startConnect()
     }
 
+    /// REQ B-7: 識別子を再取得するボタン(nRF Connect で接続してから押す)。
+    func reacquireIdentifier() {
+        guard central.state == .poweredOn else { return }
+        let serviceUUID = CBUUID(string: configuration.serviceUUID)
+        let found = central.retrieveConnectedPeripherals(withServices: [serviceUUID])
+        appendLog(kind: .connection, hex: nil, note: "識別子を再取得: FDD2 で接続中の周辺機器 \(found.count)件")
+        if let p = found.first {
+            connect(p, route: "識別子を再取得ボタン")
+        } else {
+            appendLog(kind: .error, hex: nil, note: "FDD2 接続中の周辺機器がありません。nRF Connect を接続してからボタンを押してください")
+        }
+    }
+
     func clearLogs() {
         logs.removeAll()
+    }
+
+    /// REQ C-3: 全ログを1タップでコピー。
+    var allLogsText: String {
+        logs.reversed().map { copyText(of: $0) }.joined(separator: "\n")
     }
 
     var discoveredAllText: String {
@@ -187,10 +226,55 @@ final class BLEService: NSObject, ObservableObject {
         return lines.joined(separator: "\n")
     }
 
-    // MARK: - Private: connection flow
+    /// REQ D-1: 手動送信(.withResponse)。エラー/成功はログに出す。
+    func sendDebug(preset: DebugPreset? = nil, hexString: String? = nil, trigger: String) {
+        guard let peripheral, peripheral.state == .connected else {
+            appendLog(kind: .error, hex: nil, note: "送信不可(未接続)")
+            return
+        }
+        guard let writeCharacteristic else {
+            appendLog(kind: .error, hex: nil, note: "送信不可(書込特性が見つかっていない)")
+            return
+        }
+        let template = preset?.template ?? hexString ?? ""
+        guard !template.isEmpty else {
+            appendLog(kind: .error, hex: nil, note: "送信不可(HEXが空)")
+            return
+        }
+        guard let data = HexTool.parse(template, idByte: controlTerminalByte()) else {
+            appendLog(kind: .error, hex: nil, note: "送信不可(HEX解析失敗: \(template) / 直近ID=\(lastControlTerminalHex ?? "なし"))")
+            return
+        }
+        let hex = data.map { String(format: "%02X", $0) }.joined(separator: " ")
+        appendLog(kind: .control, hex: nil, note: "\(trigger) 送信 → \(writeCharacteristic.uuid.uuidString) (\(data.count)B): \(hex)")
+        peripheral.writeValue(data, for: writeCharacteristic, type: .withResponse)
+    }
+
+    func sendDebugAuto(trigger: String) {
+        guard autoSendMode != .off else { return }
+        let preset: DebugPreset
+        switch autoSendMode {
+        case .off:
+            return
+        case .p1: preset = .p1
+        case .p2: preset = .p2
+        case .p3: preset = .p3
+        case .p3ThenP1:
+            preset = (lastAutoSentPreset == .p3) ? .p1 : .p3
+        }
+        lastAutoSentPreset = preset
+        sendDebug(preset: preset, trigger: "\(trigger) 自動送信(\(preset.rawValue))")
+    }
+
+    private func controlTerminalByte() -> UInt8? {
+        guard let hex = lastControlTerminalHex else { return nil }
+        return UInt8(hex, radix: 16)
+    }
+
+    // MARK: - Private: connection flow (REQ B)
 
     private func startConnect() {
-        cancelReconnect()
+        cancelRetry()
         stopScan()
         guard central.state == .poweredOn, central.authorization == .allowedAlways else {
             updateStateDiagnostics()
@@ -198,23 +282,39 @@ final class BLEService: NSObject, ObservableObject {
         }
         let serviceUUID = CBUUID(string: configuration.serviceUUID)
 
-        if let saved = savedIdentifier,
-           let p = central.retrievePeripherals(withIdentifiers: [saved]).first {
-            appendLog(kind: .connection, hex: nil, note: "保存済み識別子で直接接続を試みます")
-            connect(p)
-            return
+        // 優先順1: 保存識別子での保留接続(スキャン不要・タイムアウトなし)
+        if let saved = savedIdentifier {
+            let retrieved = central.retrievePeripherals(withIdentifiers: [saved])
+            appendLog(kind: .connection, hex: nil, note: "retrievePeripherals(保存識別子) = \(retrieved.count)件")
+            if let p = retrieved.first {
+                connect(p, route: "保存識別子による保留接続")
+                return
+            }
         }
+
+        // 優先順2: システムがBLE接続済みの周辺機器を取得して接続
         if let connected = central.retrieveConnectedPeripherals(withServices: [serviceUUID]).first {
-            appendLog(kind: .connection, hex: nil, note: "システム接続済みのFDD2周辺機器を検出。直接接続します")
-            connect(connected)
+            connect(connected, route: "システム接続からの取得")
             return
         }
+
+        // 優先順3: 広域スキャン(補助)
         startUnfilteredScan()
     }
 
-    /// REQ A-5: 最初からサービス指定なし・AllowDuplicates有効の広域スキャン。
+    /// REQ B-5: 未接続の間は5秒ごとの定期処理。
+    private func maintenanceTick() {
+        guard central.state == .poweredOn, central.authorization == .allowedAlways else { return }
+        if peripheral?.state == .connected { return }
+        if peripheral?.state == .connecting { return }
+        if awaitingConnection { return }
+        startConnect()
+    }
+
+    /// REQ A-5: スキャン(補助経路)。サービス指定なし・AllowDuplicates有効。
     private func startUnfilteredScan() {
         guard central.state == .poweredOn, central.authorization == .allowedAlways else { return }
+        guard !scanning else { return }
         scanning = true
         phase = .scanning
         appendLog(kind: .connection, hex: nil, note: "広域スキャン開始(重複許可・全デバイス照会)")
@@ -229,38 +329,73 @@ final class BLEService: NSObject, ObservableObject {
         scanning = false
     }
 
-    private func connect(_ p: CBPeripheral) {
-        cancelReconnect()
+    /// REQ B-1: connect は identifier を必ず保存する。state が connected なら
+    /// GATT 探索からやり直し、disconnected なら connect() を呼ぶ(保留接続)。
+    private func connect(_ p: CBPeripheral, route: String) {
+        cancelRetry()
         stopScan()
         peripheral?.delegate = nil
         peripheral = p
         p.delegate = self
         awaitingInitialValue = false
+        awaitingConnection = false
         subscribed7B61 = false
         subscribedFE03 = false
         serviceCatalog = []
+        writeCharacteristic = nil
         audioSessionCount = 0
         audioPacketCount = 0
         audioPacketTotal = 0
         audioLoggedInSession = 0
-        phase = .connecting(device: p.name ?? "(名前未取得)")
-        appendLog(kind: .connection, hex: nil, note: "接続中: \(p.name ?? "(名前未取得)") id=\(p.identifier.uuidString.prefix(8))")
+        lastAutoSentPreset = nil
+        connectionRoute = route
+        UserDefaults.standard.set(p.identifier.uuidString, forKey: savedIdentifierKey)
+
+        if p.state == .connected {
+            appendLog(kind: .connection, hex: nil, note: "connect() 呼出 [経路: \(route)] state=connected のため全サービス探索から継続")
+            resolveServiceDiscovery(for: p)
+            return
+        }
+        guard p.state == .disconnected else {
+            appendLog(kind: .error, hex: nil, note: "connect() 呼出 [経路: \(route)] は実行せず(state=\(stateName(p.state)))、5秒後の定期処理で再試行")
+            return
+        }
+        awaitingConnection = true
+        phase = .pending(device: p.name ?? "(名前未取得)")
+        appendLog(kind: .connection, hex: nil, note: "connect() 呼出 [経路: \(route)] id=\(p.identifier.uuidString.prefix(8)) state=\(stateName(p.state))")
         central.connect(p)
     }
 
-    private func scheduleReconnect(reason: String) {
-        appendLog(kind: .connection, hex: nil, note: "3秒後に再接続 (\(reason))")
-        reconnectWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.startConnect()
-        }
-        reconnectWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
+    private func resolveServiceDiscovery(for p: CBPeripheral) {
+        p.delegate = self
+        serviceCatalog = []
+        p.discoverServices(nil)
     }
 
-    private func cancelReconnect() {
-        reconnectWorkItem?.cancel()
-        reconnectWorkItem = nil
+    private func stateName(_ state: CBPeripheralState) -> String {
+        switch state {
+        case .connected: return "connected"
+        case .connecting: return "connecting"
+        case .disconnected: return "disconnected"
+        case .disconnecting: return "disconnecting"
+        @unknown default: return "不明"
+        }
+    }
+
+    private func scheduleRetryConnect(seconds: TimeInterval, reason: String) {
+        retryWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            if let self, !self.awaitingConnection {
+                self.startConnect()
+            }
+        }
+        retryWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+
+    private func cancelRetry() {
+        retryWorkItem?.cancel()
+        retryWorkItem = nil
     }
 
     // MARK: - Private: diagnostics
@@ -287,6 +422,7 @@ final class BLEService: NSObject, ObservableObject {
             }
         }()
         isScanning = scanning
+        isScanningCore = central.isScanning
         discoverCallbackCount = discoverCallbacks
         lastDiscoveredName = lastDiscoveryName
         discoveredDevices = sortedDiscoveredList()
@@ -300,18 +436,37 @@ final class BLEService: NSObject, ObservableObject {
         }
     }
 
-    /// 1秒おきに画面向けの published 値を更新する。
     private func refreshDiagnostics() {
         updateStateDiagnostics()
         audioPacketCount = audioPacketTotal
+        // REQ A-1: CoreBluetooth の isScanning を1秒ごとに観測。変化したときだけログに残す
+        // (毎秒残すと100件のログをすぐ溢れさせるため)。
+        if lastCoreScanningLogged != isScanningCore {
+            lastCoreScanningLogged = isScanningCore
+            appendLog(kind: .connection, hex: nil, note: "isScanning(CoreBluetooth) = \(isScanningCore) / 自前フラグ = \(scanning)")
+        }
+        // REQ B-5: 未接続のときの再取得・保留接続は5秒ごとにまとめて実施する
+        maintenanceCounter += 1
+        if maintenanceCounter >= 5 {
+            maintenanceCounter = 0
+            maintenanceTick()
+        }
     }
 
-    // MARK: - Private: audio session (REQ C)
+    private var maintenanceCounter = 0
+
+    // MARK: - Private: audio/control handling (REQ C/D)
 
     private func startAudioSession() {
         audioSessionCount += 1
         audioLoggedInSession = 0
         appendLog(kind: .audio, hex: nil, note: "受付セッション#\(audioSessionCount) 開始(FE03 購読中)")
+    }
+
+    /// REQ D-4: 制御パケット受信時に自動送信モードに従って送る。
+    private func maybeAutoSendOnControl() {
+        guard autoSendMode != .off else { return }
+        sendDebugAuto(trigger: "制御パケット受信につき")
     }
 
     // MARK: - Logging
@@ -327,7 +482,6 @@ final class BLEService: NSObject, ObservableObject {
         UserDefaults.standard.string(forKey: savedIdentifierKey).flatMap(UUID.init(uuidString:))
     }
 
-    /// REQ D: 特性プロパティの文字列表現。
     private func propertiesText(_ p: CBCharacteristicProperties) -> String {
         var parts: [String] = []
         if p.contains(.read) { parts.append("read") }
@@ -356,7 +510,6 @@ extension BLEService: CBCentralManagerDelegate {
                 updateStateDiagnostics()
                 return
             }
-            phase = .idle(device: nil)
             startConnect()
         case .poweredOff:
             phase = .idle(device: "Bluetooth オフ!コントロールセンターでオンにしてください(スキャンは行いません)")
@@ -410,37 +563,49 @@ extension BLEService: CBCentralManagerDelegate {
 
         if matches {
             stopScan()
-            UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: savedIdentifierKey)
-            connect(peripheral)
+            connect(peripheral, route: "スキャン発見")
         }
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        appendLog(kind: .connection, hex: nil, note: "接続しました。全サービスを探索します")
+        awaitingConnection = false
+        appendLog(kind: .connection, hex: nil, note: "didConnect 受信 [経路: \(connectionRoute)]")
         peripheral.delegate = self
         serviceCatalog = []
         peripheral.discoverServices(nil)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        appendLog(kind: .error, hex: nil, note: "接続失敗: \(error?.localizedDescription ?? "不明")")
-        phase = .idle(device: "接続失敗 — 再試行します")
-        scheduleReconnect(reason: "didFailToConnect")
+        awaitingConnection = false
+        let nsError = error as NSError?
+        appendLog(kind: .error, hex: nil, note: "didFailToConnect domain=\(nsError?.domain ?? "-") code=\(nsError?.code ?? -1) \(error?.localizedDescription ?? "不明")")
+        phase = .idle(device: "接続失敗 — 2秒後に再試行します")
+        scheduleRetryConnect(seconds: 2.0, reason: "didFailToConnect")
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        awaitingConnection = false
         subscribed7B61 = false
         subscribedFE03 = false
-        appendLog(kind: .connection, hex: nil, note: "切断: \(error?.localizedDescription ?? "正常")")
-        phase = .idle(device: "切断 — 再接続します")
-        scheduleReconnect(reason: "didDisconnect")
+        let nsError = error as NSError?
+        appendLog(kind: .connection, hex: nil, note: "切断 domain=\(nsError?.domain ?? "-") code=\(nsError?.code ?? -1) state=\(stateName(peripheral.state))")
+        phase = .idle(device: "接続が切れました — 即座に保留接続を再設定します")
+        cancelRetry()
+        if peripheral.state == .disconnected {
+            connect(peripheral, route: "切断後の即時保留接続(B-4)")
+        } else {
+            scheduleRetryConnect(seconds: 2.0, reason: "切断後フォールバック")
+        }
     }
 
     func centralManager(_ central: CBCentralManager, willRestoreState state: [String: Any]) {
         if let p = state[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral], let first = p.first {
             peripheral = first
             first.delegate = self
+            awaitingConnection = false
             UserDefaults.standard.set(first.identifier.uuidString, forKey: savedIdentifierKey)
+            appendLog(kind: .connection, hex: nil, note: "状態復元: 周辺機器 \(first.identifier.uuidString.prefix(8)) を取得。GATT探索をやり直します(REQ B-8)")
+            resolveServiceDiscovery(for: first)
         }
     }
 }
@@ -498,6 +663,9 @@ extension BLEService: CBPeripheralDelegate {
                 if !characteristic.isNotifying {
                     peripheral.setNotifyValue(true, for: characteristic)
                 }
+            } else if uuid.caseInsensitiveCompare(configuration.writeCharacteristicUUID) == .orderedSame {
+                writeCharacteristic = characteristic
+                appendLog(kind: .connection, hex: nil, note: "書込特性を見つけました(FE03 手動送信ツールが使用可能)")
             }
         }
     }
@@ -518,6 +686,15 @@ extension BLEService: CBPeripheralDelegate {
         phase = .subscribed(device: peripheral.name ?? "Bose NC 700")
     }
 
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error = error {
+            let nsError = error as NSError
+            appendLog(kind: .error, hex: nil, note: "書込失敗 domain=\(nsError.domain) code=\(nsError.code) \(nsError.localizedDescription)")
+        } else {
+            appendLog(kind: .control, hex: nil, note: "書込完了(withResponse)")
+        }
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
             appendLog(kind: .error, hex: nil, note: "値取得エラー(\(characteristic.uuid.uuidString)): \(error.localizedDescription)")
@@ -526,13 +703,20 @@ extension BLEService: CBPeripheralDelegate {
         guard let data = characteristic.value else { return }
         let uuid = characteristic.uuid.uuidString.uppercased()
 
-        // REQ C: FE03 は音声。保存/全表示はしない。受付セッションごとに最初の
-        // 5 パケットだけ長さと先頭16バイトをログに出し、以降は件数のみ。
+        // REQ C-1: <64B は制御で毎回全バイト。>=100B は音声でセッション頭5個だけ。
         if uuid.caseInsensitiveCompare(configuration.audioCharacteristicUUID) == .orderedSame {
+            let bytes = [UInt8](data)
+            if bytes.count < 64 {
+                let hexAll = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+                lastControlTerminalHex = bytes.last.map { String(format: "%02X", $0) }
+                appendLog(kind: .control, hex: hexAll, note: "FE03制御 \(bytes.count)B (末尾=\(lastControlTerminalHex ?? "-"))")
+                maybeAutoSendOnControl()
+                return
+            }
             audioPacketTotal += 1
-            if audioLoggedInSession < 5 {
-                let head = data.prefix(16).map { String(format: "%02X", $0) }.joined(separator: " ")
-                appendLog(kind: .audio, hex: head, note: "FE03 #\(audioLoggedInSession + 1) Length=\(data.count)")
+            if bytes.count >= 100 && audioLoggedInSession < 5 {
+                let head = bytes.prefix(16).map { String(format: "%02X", $0) }.joined(separator: " ")
+                appendLog(kind: .audio, hex: head, note: "FE03音声 #\(audioLoggedInSession + 1) 長さ=\(bytes.count)")
                 audioLoggedInSession += 1
             }
             return

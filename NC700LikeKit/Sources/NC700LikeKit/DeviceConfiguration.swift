@@ -9,6 +9,9 @@ public struct DeviceConfiguration: Codable, Equatable, Sendable {
     public var audioServiceUUID: String
     public var audioCharacteristicUUID: String
 
+    /// FE03 の書き込み用特性。デバッグ用の手動送信(D)で使う。
+    public var writeCharacteristicUUID: String
+
     /// 0始まりのオフセット。観測では値は19バイトで、末尾2バイト(index 17,18)が変化する
     public var stateOffsetInBytes: Int
     public var stateLengthInBytes: Int
@@ -22,6 +25,7 @@ public struct DeviceConfiguration: Codable, Equatable, Sendable {
         characteristicUUID: String = "7B61AD83-041C-4333-A0AB-EFB2AB7BDD43",
         audioServiceUUID: String = "FE03",
         audioCharacteristicUUID: String = "2BEEA05B-1879-4BB4-8A2F-72641F82420B",
+        writeCharacteristicUUID: String = "F04EB177-3005-43A7-AC61-A390DDF83076",
         stateOffsetInBytes: Int = 17,
         stateLengthInBytes: Int = 2,
         pressStates: [[UInt8]] = [[0x00, 0x06], [0x10, 0x0E]],
@@ -32,6 +36,7 @@ public struct DeviceConfiguration: Codable, Equatable, Sendable {
         self.characteristicUUID = characteristicUUID
         self.audioServiceUUID = audioServiceUUID
         self.audioCharacteristicUUID = audioCharacteristicUUID
+        self.writeCharacteristicUUID = writeCharacteristicUUID
         self.stateOffsetInBytes = stateOffsetInBytes
         self.stateLengthInBytes = stateLengthInBytes
         self.pressStates = pressStates
@@ -68,6 +73,7 @@ extension DeviceConfiguration {
         if let v = partial.characteristicUUID { config.characteristicUUID = v }
         if let v = partial.audioServiceUUID { config.audioServiceUUID = v }
         if let v = partial.audioCharacteristicUUID { config.audioCharacteristicUUID = v }
+        if let v = partial.writeCharacteristicUUID { config.writeCharacteristicUUID = v }
         if let v = partial.stateOffsetInBytes, v >= 0 { config.stateOffsetInBytes = v }
         if let v = partial.stateLengthInBytes, v > 0 { config.stateLengthInBytes = v }
         if let v = partial.pressStates {
@@ -93,6 +99,7 @@ public struct PartialDeviceConfiguration: Codable, Sendable {
     public var characteristicUUID: String?
     public var audioServiceUUID: String?
     public var audioCharacteristicUUID: String?
+    public var writeCharacteristicUUID: String?
     public var stateOffsetInBytes: Int?
     public var stateLengthInBytes: Int?
     public var pressStates: [[Int]]?

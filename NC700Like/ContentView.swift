@@ -3,6 +3,7 @@ import UIKit
 
 struct ContentView: View {
     @StateObject private var ble = BLEService()
+    @State private var debugHex = DebugPreset.p1.template
 
     var body: some View {
         NavigationStack {
@@ -13,26 +14,31 @@ struct ContentView: View {
                         Text(ble.phase.label)
                             .font(.body)
                     }
+                    diagnosticRow("接続経路", value: ble.connectionRoute)
                     diagnosticRow("認可", value: ble.authorizationText)
                     diagnosticRow("state", value: ble.stateText)
-                    diagnosticRow("スキャン中", value: ble.isScanning ? "YES" : "—")
+                    diagnosticRow("isScanning(自前フラグ)", value: ble.isScanning ? "YES" : "NO")
+                    diagnosticRow("isScanning(CoreBluetooth)", value: ble.isScanningCore ? "YES" : "NO")
                     diagnosticRow("didDiscover 呼出数", value: "\(ble.discoverCallbackCount)")
                     diagnosticRow("最終発見", value: ble.lastDiscoveredName ?? "—")
-                    HStack {
-                        Text("7B61 購読")
-                        Spacer()
-                        Text(ble.subscribed7B61 ? "7B61購読済み ✓" : "—")
-                            .foregroundStyle(ble.subscribed7B61 ? .green : .secondary)
-                    }
-                    HStack {
-                        Text("FE03 購読")
-                        Spacer()
-                        Text(ble.subscribedFE03 ? "FE03購読済み ✓" : "—")
-                            .foregroundStyle(ble.subscribedFE03 ? .green : .secondary)
-                    }
-                    Button("再接続 / スキャン開始") {
+                    diagnosticRow("7B61 購読", value: ble.subscribed7B61 ? "7B61購読済み ✓" : "—")
+                    diagnosticRow("FE03 購読", value: ble.subscribedFE03 ? "FE03購読済み ✓" : "—")
+                    Button("手動で再接続 / スキャン") {
                         ble.connectExplicit()
                     }
+                }
+
+                Section {
+                    Text("接続できないとき: nRF Connect で NC700 に接続してから、下のボタンを押してください。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("識別子を再取得(システム接続を探す)") {
+                        ble.reacquireIdentifier()
+                    }
+                } header: {
+                    Text("デバイス再取得(B-7)")
+                } footer: {
+                    Text("電源入れ直しで識別子が変わった疑いがある場合に使います。")
                 }
 
                 Section("押下検出") {
@@ -61,6 +67,43 @@ struct ContentView: View {
                         Text("\(ble.audioPacketCount)")
                             .monospacedDigit()
                     }
+                }
+
+                Section("FE03 手動送信(デバッグ用・未検証)") {
+                    HStack {
+                        Text("直近制御パケット末尾({ID})")
+                        Spacer()
+                        Text(ble.lastControlTerminalHex ?? "—")
+                            .monospaced()
+                            .foregroundStyle(.secondary)
+                    }
+                    TextField(
+                        "HEX(スペース区切り可、{ID}は末尾バイトに置換)",
+                        text: $debugHex
+                    )
+                    .font(.system(size: 11, design: .monospaced))
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    HStack {
+                        ForEach(DebugPreset.allCases) { preset in
+                            Button(preset.rawValue) {
+                                debugHex = preset.template
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                    Picker("制御パケット受信時の自動送信", selection: $ble.autoSendMode) {
+                        ForEach(AutoSendMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    Button("このHEXを書き込む(.withResponse)") {
+                        ble.sendDebug(hexString: debugHex, trigger: "手動")
+                    }
+                    Text("P1/P2/P3 は仮説の未検証データです。書込結果と送信後の 7B61・FE03 の受信はログに出ます。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section {
@@ -102,8 +145,6 @@ struct ContentView: View {
                             .font(.caption)
                         }
                     }
-                } footer: {
-                    Text("★=名前またはFDD2が一致した対象。0件ならNC700の広告そのものが飛んでいない状態です。")
                 }
 
                 Section {
@@ -130,8 +171,6 @@ struct ContentView: View {
                             .font(.caption)
                         }
                     }
-                } footer: {
-                    Text("FE03の書き込み用特性(write)の有無を確認するのに使えます。")
                 }
 
                 Section {
@@ -168,8 +207,12 @@ struct ContentView: View {
                     }
                 } header: {
                     HStack {
-                        Text("ログ(新着順、最大100件)")
+                        Text("ログ(新着順、最大100件・時刻はミリ秒)")
                         Spacer()
+                        Button("全ログをコピー") {
+                            UIPasteboard.general.string = ble.allLogsText
+                        }
+                        .font(.caption)
                         if !ble.logs.isEmpty {
                             Button("クリア") {
                                 ble.clearLogs()
@@ -180,6 +223,14 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("NC700Like 診断")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    NavigationLink("ScanProbe") {
+                        ScanProbeView()
+                    }
+                    .font(.caption)
+                }
+            }
         }
     }
 
@@ -199,7 +250,7 @@ struct ContentView: View {
         switch ble.phase {
         case .subscribed:
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-        case .connected, .connecting, .scanning:
+        case .connected, .pending, .scanning:
             Image(systemName: "antenna.radiowaves.left.and.right").foregroundStyle(.blue)
         case .idle:
             Image(systemName: "circle").foregroundStyle(.secondary)
@@ -213,6 +264,7 @@ struct ContentView: View {
         case .notification: return .secondary
         case .press: return .green
         case .audio: return .orange
+        case .control: return .purple
         case .error: return .red
         }
     }
