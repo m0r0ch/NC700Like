@@ -96,7 +96,8 @@ final class ExperimentRunner: ObservableObject {
             answerA: "",
             answerB: "",
             answerC: "",
-            memo: ""
+            memo: "",
+            createdAt: Date()
         )
         trial.events.append(TrialEvent(
             relMs: 0,
