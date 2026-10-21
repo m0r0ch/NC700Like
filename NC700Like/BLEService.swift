@@ -69,6 +69,7 @@ final class BLEService: NSObject, ObservableObject {
     private var detector = ButtonEventDetector()
     private var awaitingInitialValue = false
     private var reconnectWorkItem: DispatchWorkItem?
+    private var scanTimer: DispatchWorkItem?
     private let savedIdentifierKey = "savedPeripheralIdentifier"
 
     init(configuration: DeviceConfiguration = .load()) {
@@ -112,32 +113,63 @@ final class BLEService: NSObject, ObservableObject {
     // MARK: - Private: connection flow
 
     private func startConnect() {
+        cancelReconnect()
         let serviceUUID = CBUUID(string: configuration.serviceUUID)
 
         // 保存済み識別子があれば即接続
         if let saved = savedIdentifier,
            let p = central.retrievePeripherals(withIdentifiers: [saved]).first {
+            appendLog(kind: .connection, hex: nil, note: "保存済み識別子で接続を試みます")
             connect(p)
             return
         }
 
-        // 接続済み(Bose側が保持している)周辺機器を再取得
+        // システムがBLEで接続済み(他アプリを含む)なら取得して接続
         if let connected = central.retrieveConnectedPeripherals(withServices: [serviceUUID]).first {
+            appendLog(kind: .connection, hex: nil, note: "接続済み周辺機器を検出(システム経由)。これに接続します")
             connect(connected)
             return
         }
 
-        // 見つからなければスキャン
-        setPhase(.scanning)
-        appendLog(kind: .connection, hex: nil, note: "スキャン開始")
+        startScan(filtered: true)
+    }
+
+    /// FDD3絞りスキャン → 10秒見つからなければ広域スキャンに切り替える。
+    /// 広域では見つかった全デバイスの名前と広告サービスをログに出す(診断用)。
+    private func startScan(filtered: Bool) {
+        stopScan()
+        let serviceUUID = CBUUID(string: configuration.serviceUUID)
+        if filtered {
+            appendLog(kind: .connection, hex: nil, note: "スキャン開始 (広告サービス \(configuration.serviceUUID) で絞り込み)")
+            scanTimer = DispatchWorkItem { [weak self] in
+                self?.startScan(filtered: false)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10.0, execute: scanTimer!)
+        } else {
+            appendLog(kind: .connection, hex: nil, note: "スキャン範囲を広げました。見つけた周辺機器をすべてログに出します")
+            scanTimer = DispatchWorkItem { [weak self] in
+                self?.appendLog(kind: .connection, hex: nil, note: "広域スキャン継続中…見つかればログに出ます")
+                self?.startScan(filtered: true)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30.0, execute: scanTimer!)
+        }
         central.scanForPeripherals(
-            withServices: [serviceUUID],
+            withServices: filtered ? [serviceUUID] : nil,
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
         )
     }
 
+    private func stopScan() {
+        scanTimer?.cancel()
+        scanTimer = nil
+        if central.state == .poweredOn {
+            central.stopScan()
+        }
+    }
+
     private func connect(_ p: CBPeripheral) {
         cancelReconnect()
+        stopScan()
         peripheral?.delegate = nil
         peripheral = p
         p.delegate = self
@@ -228,15 +260,22 @@ extension BLEService: CBCentralManagerDelegate {
         advertisementData: [String: Any],
         rssi RSSI: NSInteger
     ) {
-        guard let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? peripheral.name,
-              name.range(of: configuration.scanNameFragment, options: .caseInsensitive) != nil
-        else {
-            appendLog(kind: .connection, hex: nil, note: "別の周辺機器を無視: \(peripheral.identifier.uuidString.prefix(8))")
-            return
+        let advName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
+        let name = advName ?? peripheral.name
+        let advServices = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? [])
+            .map { $0.uuidString }
+        let nameMatches = name?.range(of: configuration.scanNameFragment, options: .caseInsensitive) != nil
+        let advertisesOurService = advServices.contains {
+            $0.caseInsensitiveCompare(configuration.serviceUUID) == .orderedSame
         }
+        guard nameMatches || advertisesOurService else { return }
+
         central.stopScan()
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: savedIdentifierKey)
-        appendLog(kind: .connection, hex: nil, note: "発見: \(name) RSSI=\(RSSI)")
+        appendLog(
+            kind: .connection, hex: nil,
+            note: "発見: \(name ?? "(名前未取得)") 広告サービス=\(advServices.joined(separator: ",")) RSSI=\(RSSI) ID=\(peripheral.identifier.uuidString.prefix(8))"
+        )
         connect(peripheral)
     }
 
