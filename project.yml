@@ -1,0 +1,32 @@
+name: NC700Like
+options:
+  bundleIdPrefix: jp.nc700like
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  NC700LikeKit:
+    path: NC700LikeKit
+targets:
+  NC700Like:
+    type: application
+    platform: iOS
+    sources:
+      - NC700Like
+    dependencies:
+      - package: NC700LikeKit
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+    info:
+      path: NC700Like/Info.plist
+      properties:
+        CFBundleDisplayName: NC700Like
+        UILaunchScreen: {}
+schemes:
+  NC700Like:
+    build:
+      targets:
+        NC700Like: all
+    run:
+      config: Debug
