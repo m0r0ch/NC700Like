@@ -370,8 +370,11 @@ final class ExperimentRunner: ObservableObject {
     private func handle(_ event: BLEEvent) {
         switch event.kind {
         case .press:
-            if phase == .waitingForPress, startAt == nil {
-                handleStart(event.date, reason: "押下検出(7B61)")
+            if phase == .waitingForPress, startAt == nil,
+               ble.isPressedState(event.bytes) {
+                // 押下検出は両状態(00 06/10 0E)の遷移で発火するため、
+                // 押し込み(10 0E)側だけを START として採用する。
+                handleStart(event.date, reason: "押下検出(7B61→押し込み)")
             }
             appendEvent(relFromStart(), "押下検出 7B61=\(event.hexText)")
         case .control:

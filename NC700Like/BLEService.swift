@@ -299,6 +299,16 @@ final class BLEService: NSObject, ObservableObject {
         return state.elementsEqual(idle)
     }
 
+    /// 渡された 7B61 値が「押し込み状態(pressStates[1]=10 0E)」か。
+    /// 押下検出は両状態の遷移で発火するため、実験の START 検出では
+    /// 押し込み状態側の遷移だけを START として採用する(試行12 の誤検出対策)。
+    func isPressedState(_ data: Data) -> Bool {
+        guard configuration.pressStates.count >= 2 else { return false }
+        let bytes = [UInt8](data)
+        guard let state = detector.extractState(from: bytes) else { return false }
+        return state.elementsEqual(configuration.pressStates[1])
+    }
+
     /// 実験モード用の書込(.withResponse)。完了/失敗を completion で返す。
     /// data が nil(未接続・HEX解析失敗・書込特性なし)は false で即返す。
     func writeControl(data: Data?, label: String, completion: @escaping (Bool) -> Void) {
