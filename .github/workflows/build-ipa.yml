@@ -18,7 +18,7 @@ jobs:
       - name: Inject build commit
         run: |
           SHA=$(git rev-parse --short HEAD)
-          printf 'import Foundation\n\n/// CI により git commit を注入(ローカル既定は unknown)。\nenum BuildCommit {\n    static let sha = "%s"\n}\n' "$SHA" > NC700Like/NC700Like/BuildCommit.swift
+          printf 'import Foundation\n\n/// CI により git commit を注入(ローカル既定は unknown)。\nenum BuildCommit {\n    static let sha = "%s"\n}\n' "$SHA" > NC700Like/BuildCommit.swift
 
       - name: Install xcodegen
         run: brew install xcodegen
