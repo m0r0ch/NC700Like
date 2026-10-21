@@ -4,6 +4,7 @@ public struct DeviceConfiguration: Codable, Equatable, Sendable {
     public var serviceUUID: String
     public var characteristicUUID: String
 
+    /// 0始まりのオフセット。観測では値は19バイトで、末尾2バイト(index 17,18)が変化する
     public var stateOffsetInBytes: Int
     public var stateLengthInBytes: Int
     public var pressStates: [[UInt8]]
@@ -14,7 +15,7 @@ public struct DeviceConfiguration: Codable, Equatable, Sendable {
     public init(
         serviceUUID: String = "FDD2",
         characteristicUUID: String = "7B61AD83-041C-4333-A0AB-EFB2AB7BDD43",
-        stateOffsetInBytes: Int = 16,
+        stateOffsetInBytes: Int = 17,
         stateLengthInBytes: Int = 2,
         pressStates: [[UInt8]] = [[0x00, 0x06], [0x10, 0x0E]],
         debounceInterval: TimeInterval = 0.3,

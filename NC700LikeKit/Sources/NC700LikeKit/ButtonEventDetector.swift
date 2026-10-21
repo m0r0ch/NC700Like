@@ -3,7 +3,7 @@ import Foundation
 /// FDD2サービスの7B61特性から押下を検出する純粋ロジック。
 ///
 /// 設計書第3章の観測事実:
-/// - 値は19バイトで、末尾2バイト(0始まり17,18番目)だけが変化する。
+/// - 値は19バイトで、末尾2バイト(index 17,18)だけが変化する。
 /// - 待機時 `00 06`、押下後 `10 0E` で、押すたびに交互に入れ替わる。
 public struct ButtonEventDetector: Sendable {
     public enum Output: Equatable, Sendable {
@@ -56,7 +56,7 @@ public struct ButtonEventDetector: Sendable {
     }
 
     /// stateOffsetInBytes の位置から stateLengthInBytes バイトを取り出す。
-    /// 設計書は1始まり(17番目と18番目)だが、ここでは0始まりのオフセット16とする。
+    /// 既定設定では value[17..<19](0始まり。設計書の「17番目と18番目」)。
     func extractState(from value: [UInt8]) -> [UInt8]? {
         let offset = configuration.stateOffsetInBytes
         let length = configuration.stateLengthInBytes
