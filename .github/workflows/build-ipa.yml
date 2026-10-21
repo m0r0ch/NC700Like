@@ -15,13 +15,18 @@ jobs:
         run: swift test
         working-directory: NC700LikeKit
 
+      - name: Inject build commit
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          printf 'import Foundation\n\n/// CI により git commit を注入(ローカル既定は unknown)。\nenum BuildCommit {\n    static let sha = "%s"\n}\n' "$SHA" > NC700Like/NC700Like/BuildCommit.swift
+
       - name: Install xcodegen
         run: brew install xcodegen
 
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build (unsigned)
+      - name: Build NC700Like (unsigned)
         run: |
           set -o pipefail
           xcodebuild -project NC700Like.xcodeproj -scheme NC700Like \
@@ -30,23 +35,46 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
             | tee xcodebuild.log | tail -50
 
+      - name: Build BLEScanMin (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project NC700Like.xcodeproj -scheme BLEScanMin \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            | tee xcodebuild-scanmin.log | tail -50
+
       - name: Package IPA
         run: |
+          PRODUCTS=build/Build/Products/Release-iphoneos
+          rm -rf Payload NC700Like.ipa BLEScanMin.ipa
           mkdir -p Payload
-          cp -R build/Build/Products/Release-iphoneos/NC700Like.app Payload/
+          cp -R "$PRODUCTS/NC700Like.app" Payload/
           zip -r NC700Like.ipa Payload
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$PRODUCTS/BLEScanMin.app" Payload/
+          zip -r BLEScanMin.ipa Payload
       - name: Show bundle summary
         run: |
           ls -la build/Build/Products/Release-iphoneos/NC700Like.app
+          ls -la build/Build/Products/Release-iphoneos/BLEScanMin.app 2>/dev/null || true
           unzip -l NC700Like.ipa
+          unzip -l BLEScanMin.ipa
       - uses: actions/upload-artifact@v4
         with:
           name: NC700Like-ipa
           path: NC700Like.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BLEScanMin-ipa
+          path: BLEScanMin.ipa
 
       - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: xcodebuild-log
-          path: xcodebuild.log
+          path: |
+            xcodebuild.log
+            xcodebuild-scanmin.log

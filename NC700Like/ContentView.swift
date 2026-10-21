@@ -225,10 +225,16 @@ struct ContentView: View {
             .navigationTitle("NC700Like 診断")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    NavigationLink("ScanProbe") {
-                        ScanProbeView()
+                    HStack(spacing: 8) {
+                        NavigationLink("実験モード") {
+                            ExperimentView(ble: ble)
+                        }
+                        .font(.caption)
+                        NavigationLink("ScanProbe") {
+                            ScanProbeView()
+                        }
+                        .font(.caption)
                     }
-                    .font(.caption)
                 }
             }
         }

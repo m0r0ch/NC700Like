@@ -5,3 +5,5 @@ DerivedData/
 *.ipa
 Payload/
 .swiftpm/
+opencode-ghauth.log
+*.log

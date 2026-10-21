@@ -135,6 +135,24 @@ final class BLEService: NSObject, ObservableObject {
     /// REQ D-4: 自動送信のモード(画面のピッカーとバインド)。
     @Published var autoSendMode: AutoSendMode = .off
 
+    // MARK: 実験モード向け(ExperimentRunner/BLEEventHub)
+
+    /// BLE イベント中継ハブ(実験モードが購読する)。
+    let eventHub = BLEEventHub()
+
+    /// 実験モード中は通常の自動送信(D-4)を抑制する。
+    @Published var suppressAutoSend = false
+
+    /// 直近の 7B61 全値(19バイト HEX)。実験の手順0/手順3 記録に使う。
+    @Published private(set) var last7B61Hex: String?
+
+    /// 現在接続中(または直近接続)のデバイス名。実験セッションの記録に使う。
+    var connectedDeviceName: String? { peripheral?.name }
+
+    private var notify7B61: CBCharacteristic?
+    private var pending7B61ReadCompletion: ((String?) -> Void)?
+    private var pendingWriteCompletion: ((Bool) -> Void)?
+
     let configuration: DeviceConfiguration
 
     private var central: CBCentralManager!
@@ -266,9 +284,53 @@ final class BLEService: NSObject, ObservableObject {
         sendDebug(preset: preset, trigger: "\(trigger) 自動送信(\(preset.rawValue))")
     }
 
-    private func controlTerminalByte() -> UInt8? {
+    func controlTerminalByte() -> UInt8? {
         guard let hex = lastControlTerminalHex else { return nil }
         return UInt8(hex, radix: 16)
+    }
+
+    /// 直近の 7B61 が受付待ち状態(pressStates の先頭値=00 06)か。
+    /// 実験の手順0/手順3 記録に使う。
+    var isIdleState7B61: Bool {
+        guard let hex = last7B61Hex else { return false }
+        let bytes = hex.split(separator: " ").compactMap { UInt8($0, radix: 16) }
+        guard let state = detector.extractState(from: bytes) else { return false }
+        guard let idle = configuration.pressStates.first else { return false }
+        return state.elementsEqual(idle)
+    }
+
+    /// 実験モード用の書込(.withResponse)。完了/失敗を completion で返す。
+    /// data が nil(未接続・HEX解析失敗・書込特性なし)は false で即返す。
+    func writeControl(data: Data?, label: String, completion: @escaping (Bool) -> Void) {
+        guard let data, !data.isEmpty else {
+            appendLog(kind: .error, hex: nil, note: "\(label) 送信不可(HEX解析失敗 / 直近ID=\(lastControlTerminalHex ?? "なし"))")
+            completion(false)
+            return
+        }
+        guard let peripheral, peripheral.state == .connected else {
+            appendLog(kind: .error, hex: nil, note: "\(label) 送信不可(未接続)")
+            completion(false)
+            return
+        }
+        guard let writeCharacteristic else {
+            appendLog(kind: .error, hex: nil, note: "\(label) 送信不可(書込特性が見つかっていない)")
+            completion(false)
+            return
+        }
+        appendLog(kind: .control, hex: nil, note: "\(label) 送信 → \(writeCharacteristic.uuid.uuidString) (\(data.count)B): \(HexTool.hex(data))")
+        pendingWriteCompletion = completion
+        peripheral.writeValue(data, for: writeCharacteristic, type: .withResponse)
+    }
+
+    /// 実験用: 7B61 を1回読み直して HEX で返す(read 通知経由)。
+    /// 読めない(未接続/特性なし)ときは nil を completion に渡す。
+    func read7B61Once(completion: @escaping (String?) -> Void) {
+        guard let peripheral, peripheral.state == .connected, let notify7B61 else {
+            completion(last7B61Hex)
+            return
+        }
+        pending7B61ReadCompletion = completion
+        peripheral.readValue(for: notify7B61)
     }
 
     // MARK: - Private: connection flow (REQ B)
@@ -369,6 +431,7 @@ final class BLEService: NSObject, ObservableObject {
     private func resolveServiceDiscovery(for p: CBPeripheral) {
         p.delegate = self
         serviceCatalog = []
+        notify7B61 = nil
         p.discoverServices(nil)
     }
 
@@ -464,8 +527,10 @@ final class BLEService: NSObject, ObservableObject {
     }
 
     /// REQ D-4: 制御パケット受信時に自動送信モードに従って送る。
+    /// 実験モード(suppressAutoSend)中は抑制する。
     private func maybeAutoSendOnControl() {
         guard autoSendMode != .off else { return }
+        guard !suppressAutoSend else { return }
         sendDebugAuto(trigger: "制御パケット受信につき")
     }
 
@@ -587,6 +652,9 @@ extension BLEService: CBCentralManagerDelegate {
         awaitingConnection = false
         subscribed7B61 = false
         subscribedFE03 = false
+        pendingWriteCompletion = nil
+        pending7B61ReadCompletion = nil
+        eventHub.emit(BLEEvent(date: Date(), kind: .disconnected, bytes: Data()))
         let nsError = error as NSError?
         appendLog(kind: .connection, hex: nil, note: "切断 domain=\(nsError?.domain ?? "-") code=\(nsError?.code ?? -1) state=\(stateName(peripheral.state))")
         phase = .idle(device: "接続が切れました — 即座に保留接続を再設定します")
@@ -667,6 +735,11 @@ extension BLEService: CBPeripheralDelegate {
                 writeCharacteristic = characteristic
                 appendLog(kind: .connection, hex: nil, note: "書込特性を見つけました(FE03 手動送信ツールが使用可能)")
             }
+
+            // 実験用: 7B61 特性を保持(read7B61Once で使う)。
+            if uuid.caseInsensitiveCompare(configuration.characteristicUUID) == .orderedSame {
+                notify7B61 = characteristic
+            }
         }
     }
 
@@ -687,11 +760,15 @@ extension BLEService: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        let completion = pendingWriteCompletion
+        pendingWriteCompletion = nil
         if let error = error {
             let nsError = error as NSError
             appendLog(kind: .error, hex: nil, note: "書込失敗 domain=\(nsError.domain) code=\(nsError.code) \(nsError.localizedDescription)")
+            completion?(false)
         } else {
             appendLog(kind: .control, hex: nil, note: "書込完了(withResponse)")
+            completion?(true)
         }
     }
 
@@ -710,10 +787,12 @@ extension BLEService: CBPeripheralDelegate {
                 let hexAll = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
                 lastControlTerminalHex = bytes.last.map { String(format: "%02X", $0) }
                 appendLog(kind: .control, hex: hexAll, note: "FE03制御 \(bytes.count)B (末尾=\(lastControlTerminalHex ?? "-"))")
+                eventHub.emit(BLEEvent(date: Date(), kind: .control, bytes: data))
                 maybeAutoSendOnControl()
                 return
             }
             audioPacketTotal += 1
+            eventHub.emit(BLEEvent(date: Date(), kind: .audio, bytes: data))
             if bytes.count >= 100 && audioLoggedInSession < 5 {
                 let head = bytes.prefix(16).map { String(format: "%02X", $0) }.joined(separator: " ")
                 appendLog(kind: .audio, hex: head, note: "FE03音声 #\(audioLoggedInSession + 1) 長さ=\(bytes.count)")
@@ -729,6 +808,13 @@ extension BLEService: CBPeripheralDelegate {
         let wasInitial = awaitingInitialValue
         awaitingInitialValue = false
 
+        last7B61Hex = hex
+        eventHub.emit(BLEEvent(date: Date(), kind: .notification7B61, bytes: data))
+
+        let readCompletion = pending7B61ReadCompletion
+        pending7B61ReadCompletion = nil
+        readCompletion?(hex)
+
         var output: ButtonEventDetector.Output
         if wasInitial {
             detector.reset()
@@ -743,6 +829,7 @@ extension BLEService: CBPeripheralDelegate {
             pressCount += 1
             lastPressAt = Date()
             startAudioSession()
+            eventHub.emit(BLEEvent(date: Date(), kind: .press, bytes: data))
             appendLog(kind: .press, hex: hex, note: "押下を検出 (state=\(stateHex(of: bytes)))")
         case .ignored:
             if wasInitial {

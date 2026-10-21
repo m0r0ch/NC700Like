@@ -11,7 +11,9 @@ targets:
     type: application
     platform: iOS
     sources:
-      - NC700Like
+      - path: NC700Like
+        excludes:
+          - "BLEScanMin/**"
     dependencies:
       - package: NC700LikeKit
     settings:
@@ -26,10 +28,32 @@ targets:
         NSBluetoothAlwaysUsageDescription: Bose NC700 のアシスタントボタンの押下を検出するためにBluetoothを使用します。
         UIBackgroundModes:
           - bluetooth-central
+  BLEScanMin:
+    type: application
+    platform: iOS
+    sources:
+      - NC700Like/BLEScanMin
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        PRODUCT_BUNDLE_IDENTIFIER: jp.nc700like.scanmin
+    info:
+      path: NC700Like/BLEScanMin/Info.plist
+      properties:
+        CFBundleDisplayName: BLEScanMin
+        UILaunchScreen: {}
+        NSBluetoothAlwaysUsageDescription: BLE スキャン(広告受信)だけを確認するための最小アプリです。
 schemes:
   NC700Like:
     build:
       targets:
         NC700Like: all
+    run:
+      config: Debug
+  BLEScanMin:
+    build:
+      targets:
+        BLEScanMin: all
     run:
       config: Debug
