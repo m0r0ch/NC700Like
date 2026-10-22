@@ -20,14 +20,17 @@ final class LikeCoordinator: ObservableObject {
         var id: String { rawValue }
     }
 
-    /// 受付キャンセル方式(実験スイッチ)。
+    /// 受付キャンセル方式(実験スイッチ)。既定=方式5。
     /// 方式6(セッション確立後P1)は実験Bで H6 が反証されたため削除した。
+    /// 方式5は「確定済みでも P1 を使わない」に強化した(ラウンド3の失敗例 21:46 工程:
+    /// 押下前に届いた制御パケットで 5E が「確定済み」になっており、P1(5E) は別セッションの
+    /// ID だったため失敗。P3 は ID 不要なのでこの種の失敗が生じない)。
     enum CancelStrategy: String, CaseIterable, Identifiable {
         case current = "現行(即 P1+2秒再送)"
         case extended = "拡張(即 P1+8秒再送)"
         case deferOnStale = "拡張:古ID時は制御パケット待ち"
         case p3OnStale = "拡張:古ID時は P3"
-        case p3Only = "P3のみ(ID未確定時・再送なし)"
+        case p3Only = "P3のみ(再送なし)"
 
         var id: String { rawValue }
     }
@@ -213,20 +216,11 @@ final class LikeCoordinator: ObservableObject {
                 )
             }
         case .p3Only:
-            if idEstablished, terminal != nil {
-                ble.sendDebug(preset: .p1, trigger: "押下直後の受付キャンセル")
-                resendWindow = P1ResendWindow(
-                    windowSeconds: CancelRetryConstants.resendWindowSeconds,
-                    pressAt: pressedAt.timeIntervalSince1970,
-                    immediateID: terminal,
-                    sentImmediate: true
-                )
-            } else {
-                // 方式5: 未確定なら P3 の単発だけ。再送ウィンドウは作らない。
-                ble.sendDebug(preset: .p3, trigger: "押下直後の受付キャンセル(P3のみ・再送なし)")
-                resendWindow = nil
-                ble.timeline.add("P3 送信済み(再送ウィンドウは作らない)")
-            }
+            // 方式5(既定): {ID} が「今開いているセッションの ID」と一致する保証がないため、
+            // 確定済みでも P1 は使わず P3 の単発だけ。再送ウィンドウは作らない。
+            ble.sendDebug(preset: .p3, trigger: "押下直後の受付キャンセル(P3のみ・再送なし)")
+            resendWindow = nil
+            ble.timeline.add("P3 送信済み(再送ウィンドウは作らない)")
         }
 
         // 順序の揺れ対策: 押下と同時に届いたセッション開始の制御パケット(08 0B 等)が
