@@ -35,8 +35,15 @@ final class NotificationManager: NSObject, ObservableObject {
     }
 
     /// 押下結果の通知。フォアグランド(iOS 画面を開いて見ているとき)では投稿しない。
+    /// 同一曲(glue=「: 」の後の曲名)の連続通知は15秒内を1件にまとめる(二重通知防止)。
     func postLikeResult(_ message: String) {
         guard UIApplication.shared.applicationState != .active else { return }
+        let trackKey = trackKey(of: message)
+        if trackKey == lastTrackKey, Date().timeIntervalSince(lastPostedAt) < 15 {
+            return
+        }
+        lastTrackKey = trackKey
+        lastPostedAt = Date()
         let content = UNMutableNotificationContent()
         content.title = "NC700Like"
         content.body = message
@@ -44,6 +51,17 @@ final class NotificationManager: NSObject, ObservableObject {
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         center.add(request)
     }
+
+    /// 「いいね追加: 曲名」「既にいいね済みのため追加しません: 曲名」の曲名部分だけを比較キーにする。
+    private func trackKey(of message: String) -> String {
+        guard let separator = message.range(of: ": "), separator.upperBound <= message.endIndex else {
+            return message
+        }
+        return String(message[separator.upperBound...])
+    }
+
+    private var lastTrackKey: String?
+    private var lastPostedAt = Date.distantPast
 }
 
 extension NotificationManager: UNUserNotificationCenterDelegate {}
