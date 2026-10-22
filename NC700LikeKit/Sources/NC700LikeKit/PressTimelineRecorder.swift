@@ -13,7 +13,23 @@ public final class PressTimelineRecorder {
         let label: String
     }
 
+    /// 送信した書込の記録(連番付き)。
+    public struct WriteRecord: Equatable {
+        public let seq: Int
+        public let date: Date
+        public let label: String
+    }
+
+    /// 書込に対する応答の記録(書込完了/エコー候補)。
+    public struct ResponseRecord: Equatable {
+        public let writeSeq: Int
+        public let date: Date
+        public let label: String
+    }
+
     private var events: [Event] = []
+    private var writes: [WriteRecord] = []
+    private var responses: [ResponseRecord] = []
     private let now: () -> Date
 
     public private(set) var generation = 0
@@ -28,12 +44,14 @@ public final class PressTimelineRecorder {
         self.now = now
     }
 
-    /// 新しい接続世代の開始。時系列は空に戻す。
+    /// 新しい接続世代の開始。時系列・書込・応答は空に戻す。
     public func beginGeneration(connectAt: Date?) {
         generation += 1
         self.connectAt = connectAt
         pressAt = nil
         events = []
+        writes = []
+        responses = []
     }
 
     public func add(_ label: String) {
@@ -42,6 +60,47 @@ public final class PressTimelineRecorder {
             events.removeFirst(events.count - 600)
         }
     }
+
+    /// 書込(連番付き)を記録。イベントにも「書込#N ...」行を出す。
+    public func addWrite(_ label: String, seq: Int, date: Date? = nil) {
+        let date = date ?? now()
+        writes.append(WriteRecord(seq: seq, date: date, label: label))
+        events.append(Event(date: date, label: "書込#\(seq) \(label)"))
+        trim()
+    }
+
+    /// 書込への応答を記録。イベントにも「書込#Nへの応答(+lagMs) ...」行を出す。
+    public func addResponse(toWriteSeq writeSeq: Int, label: String, date: Date? = nil) {
+        let date = date ?? now()
+        responses.append(ResponseRecord(writeSeq: writeSeq, date: date, label: label))
+        let lagText: String
+        if let write = writes.first(where: { $0.seq == writeSeq && $0.date <= date }) {
+            let lag = Int((date.timeIntervalSince(write.date) * 1000).rounded())
+            lagText = "+\(lag)ms"
+        } else {
+            lagText = "+?(書込不明)"
+        }
+        events.append(Event(date: date, label: "書込#\(writeSeq)への応答(\(lagText)) \(label)"))
+        trim()
+    }
+
+    private func trim() {
+        if events.count > 600 {
+            events.removeFirst(events.count - 600)
+        }
+        if writes.count > 200 {
+            writes.removeFirst(writes.count - 200)
+        }
+        if responses.count > 200 {
+            responses.removeFirst(responses.count - 200)
+        }
+    }
+
+    /// 書込記録一覧(表示用)。
+    public var writeRecords: [WriteRecord] { writes }
+
+    /// 応答記録一覧(表示用)。
+    public var responseRecords: [ResponseRecord] { responses }
 
     /// 押下を起点として記録(以降の相対 ms はこの時刻基準)。
     /// at を指定すると event と pressAt を同一時刻に揃える。
@@ -82,7 +141,46 @@ public final class PressTimelineRecorder {
             let fromConnect = relativeMS(event.date, from: connectAt)
             lines.append("\(fromConnect)ms(押下\(fromPress)ms) \(event.label)")
         }
+        lines.append(contentsOf: summaryLines(pressStart: pressStart, eventsFromPress: Array(events[pressIndex...])))
         return lines.joined(separator: "\n")
+    }
+
+    /// 集計ブロック: セッション指標(音声の開始/終了/継続)と書込→応答の pair。
+    private func summaryLines(pressStart: Date, eventsFromPress: [Event]) -> [String] {
+        var result: [String] = []
+        result.append("--- 集計 ---")
+
+        let audioEvents = eventsFromPress.filter { $0.label.hasPrefix("FE03音声") }
+        if audioEvents.isEmpty {
+            result.append("音声: なし")
+        } else {
+            let first = relativeMS(audioEvents.first!.date, from: pressStart)
+            let last = relativeMS(audioEvents.last!.date, from: pressStart)
+            let span = Int(audioEvents.last!.date.timeIntervalSince(audioEvents.first!.date))
+            // 直近の音声が計測時点近くまで続いていれば「継続中」を注記
+            let ongoing = (now().timeIntervalSince(audioEvents.last!.date)) < 0.3
+                ? "(コピー時点で継続中の可能性)"
+                : ""
+            result.append("音声: 押下\(first)ms〜押下\(last)ms(継続 \(span)s, \(audioEvents.count)件)\(ongoing)")
+        }
+
+        let pressWrites = writes.filter { $0.date >= pressStart }
+        if pressWrites.isEmpty {
+            result.append("書込: なし")
+        } else {
+            for write in pressWrites {
+                let at = relativeMS(write.date, from: pressStart)
+                let resp = responses
+                    .filter { $0.writeSeq == write.seq && $0.date >= write.date }
+                    .compactMap { record -> String? in
+                        let lag = Int((record.date.timeIntervalSince(write.date) * 1000).rounded())
+                        return "\(record.label) +\(lag)ms"
+                    }
+                let respText = resp.isEmpty ? "応答なし" : "応答: \(resp.joined(separator: " / "))"
+                result.append("書込#\(write.seq): \(write.label)(押下\(at)ms) \(respText)")
+            }
+        }
+        return result
     }
 
     private func header(deviceName: String?, connectionRoute: String?, idEstablishedAtPress: Bool?, hasPress: Bool) -> String {

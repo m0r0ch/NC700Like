@@ -9,9 +9,13 @@ public struct ButtonEventDetector: Sendable {
     public enum Output: Equatable, Sendable {
         /// 押下とみなす変化
         case press
-        /// 無視(同状態の重複、未知の値、短すぎる値、デバウンス中)
+        /// 無視(同状態の重複、未知の値、短すぎる値、押下後の抑制中)
         case ignored
     }
+
+    /// 押下発火後この秒数以内の 7B61 状態変化は「離した/再状態化」とみなして押下扱いしない。
+    /// 00 06(受付待ち)の意味が確定するまでの暫定抑止(実験A)。
+    public static let postPressSuppressInterval: TimeInterval = 1.0
 
     public let configuration: DeviceConfiguration
 
@@ -47,8 +51,10 @@ public struct ButtonEventDetector: Sendable {
             return .ignored
         }
         guard known != lastKnownState else { return .ignored }
-        // ここまで到達 = 既知状態どうしの変化。デバウンスでまとめる。
-        if let last = lastPressAt, timestamp - last < configuration.debounceInterval {
+        // ここまで到達 = 既知状態どうしの変化。直近の押下発火から約1秒は、
+        // 離し/再状態化の変化(00 06 ↔ 10 0E)を押下として数えない(暫定)。
+        let suppressInterval = max(configuration.debounceInterval, Self.postPressSuppressInterval)
+        if let last = lastPressAt, timestamp - last < suppressInterval {
             return .ignored
         }
         lastPressAt = timestamp

@@ -30,6 +30,8 @@ final class LikeCoordinator: ObservableObject {
         case extended = "拡張(即 P1+8秒再送)"
         case deferOnStale = "拡張:古ID時は制御パケット待ち"
         case p3OnStale = "拡張:古ID時は P3"
+        case p3Only = "P3のみ(ID未確定時・再送なし)"
+        case afterSession = "セッション確立後P1(0.5秒×最大3)"
 
         var id: String { rawValue }
     }
@@ -77,6 +79,20 @@ final class LikeCoordinator: ObservableObject {
     /// 押下単位の再送ウィンドウ(Step B: トークンに紐づける。次の押下で破棄・入れ替え)。
     private var resendWindow: P1ResendWindow?
 
+    /// 方式6(セッション確立後P1)の実行状態。押下ごとに作り替える(token で判別)。
+    private struct SessionP1Plan: Equatable {
+        let token: UUID
+        let pressAt: TimeInterval
+        var sentCount: Int
+    }
+    private var sessionP1Plan: SessionP1Plan?
+    /// 方式6: 直近で P1 を送った時刻(エコー検出の基準)。
+    private var lastSessionP1SendAt: TimeInterval?
+    /// 方式6: 直近の P1 送信後に応答候補の制御パケットが届いたか。
+    private var sessionP1EchoReceived = false
+    /// 方式6: 音声の最終受信時刻(音声停止検出用)。
+    private var lastAudioPacketAt: Date?
+
     init(ble: BLEService, spotifyClient: SpotifyClient = .shared) {
         self.ble = ble
         self.spotifyClient = spotifyClient
@@ -100,6 +116,8 @@ final class LikeCoordinator: ObservableObject {
                 Task { @MainActor in self?.handlePress() }
             case .control:
                 Task { @MainActor in self?.handleControlEvent(event) }
+            case .audio:
+                Task { @MainActor in self?.handleAudioEvent(event) }
             default:
                 break
             }
@@ -138,8 +156,11 @@ final class LikeCoordinator: ObservableObject {
         let terminal = ble.controlTerminalByte()
         ble.timeline.add("押下処理開始 方式=\(strategy.rawValue) gen内{ID}確定=\(idEstablished ? "済" : "未") 直近{ID}=\(terminal.map { String(format: "%02X", $0) } ?? "なし")")
 
-        // 次の押下で前の押下のウィンドウは破棄される(入れ替え)。
+        // 次の押下で前の押下の状態(再送ウィンドウ・方式6の実行状態)は破棄される(入れ替え)。
         resendWindow = nil
+        sessionP1Plan = nil
+        lastSessionP1SendAt = nil
+        sessionP1EchoReceived = false
         switch strategy {
         case .current:
             guard terminal != nil else {
@@ -207,6 +228,35 @@ final class LikeCoordinator: ObservableObject {
                     sentImmediate: true
                 )
             }
+        case .p3Only:
+            if idEstablished, terminal != nil {
+                ble.sendDebug(preset: .p1, trigger: "押下直後の受付キャンセル")
+                resendWindow = P1ResendWindow(
+                    windowSeconds: CancelRetryConstants.resendWindowSeconds,
+                    pressAt: pressedAt.timeIntervalSince1970,
+                    immediateID: terminal,
+                    sentImmediate: true
+                )
+            } else {
+                // 方式5: 未確定なら P3 の単発だけ。再送ウィンドウは作らない。
+                ble.sendDebug(preset: .p3, trigger: "押下直後の受付キャンセル(P3のみ・再送なし)")
+                resendWindow = nil
+                ble.timeline.add("P3 送信済み(再送ウィンドウは作らない)")
+            }
+        case .afterSession:
+            // 方式6: 押下時は送らない。押下後最初の FE03 音声/制御パケットで P1 を送り、
+            // 0.5 秒間隔・最大3回の再送(応答候補の制御パケット or 音声停止で打ち止め)。
+            let plan = SessionP1Plan(
+                token: UUID(),
+                pressAt: pressedAt.timeIntervalSince1970,
+                sentCount: 0
+            )
+            sessionP1Plan = plan
+            ble.timeline.add("押下時は送信せず(セッション確立待ち)")
+            // 順序の揺れ対策: 押下前に届いてキューに残った制御パケットがあれば即送る。
+            if let recent = ble.freshControlNearPress(pressAt: pressedAt, lookbackSeconds: 1.0) {
+                triggerSessionP1IfWaiting(at: recent.date)
+            }
         }
 
         // 順序の揺れ対策: 押下と同時に届いたセッション開始の制御パケット(08 0B 等)が
@@ -239,11 +289,65 @@ final class LikeCoordinator: ObservableObject {
         guard !ble.suppressAutoSend else { return }
         guard mode == .like, cancelReceptionOnPress else { return }
         guard let terminal = event.bytes.last else { return }
+        // 方式6: P1 送信直後(0.7秒以内)の制御パケットは応答候補とみなす。
+        if let sentAt = lastSessionP1SendAt,
+           event.date.timeIntervalSince1970 - sentAt <= 0.7 {
+            sessionP1EchoReceived = true
+        }
+        // 方式6: 押下後最初の制御パケットでセッション確立後の P1 を送る。
+        triggerSessionP1IfWaiting(at: event.date)
         evaluate(
             window: resendWindow,
             terminal: terminal,
             at: event.date.timeIntervalSince1970
         )
+    }
+
+    /// 方式6 や音声停止の検出のため、音声パケットも記録する。
+    private func handleAudioEvent(_ event: BLEEvent) {
+        guard !ble.suppressAutoSend else { return }
+        lastAudioPacketAt = event.date
+        guard mode == .like, cancelReceptionOnPress else { return }
+        triggerSessionP1IfWaiting(at: event.date)
+    }
+
+    /// 方式6: 押下後最初の音声/制御パケットをトリガにして P1 を送る(以降は 0.5 秒間隔で再送)。
+    private func triggerSessionP1IfWaiting(at date: Date) {
+        guard var plan = sessionP1Plan, plan.sentCount == 0 else { return }
+        guard date.timeIntervalSince1970 > plan.pressAt else { return }
+        plan.sentCount = 1
+        sessionP1Plan = plan
+        sessionP1EchoReceived = false
+        ble.timeline.add("セッション確立後の P1 送信(方式6・初回)")
+        ble.sendDebug(preset: .p1, trigger: "セッション確立後の受付キャンセル(P1)")
+        lastSessionP1SendAt = Date().timeIntervalSince1970
+        scheduleSessionP1Resends(token: plan.token)
+    }
+
+    /// 方式6: 初回送信から 0.5 秒間隔・最大3回の再送。
+    /// 停止条件: 応答候補(制御パケット)が届く/音声が止まる/次の押下で計画が破棄される。
+    private func scheduleSessionP1Resends(token: UUID) {
+        Task { @MainActor in
+            for index in 1...CancelRetryConstants.sessionP1MaxResends {
+                try? await Task.sleep(nanoseconds: UInt64(CancelRetryConstants.sessionP1ResendInterval * 1_000_000_000))
+                guard let plan = sessionP1Plan, plan.token == token, plan.sentCount >= 1 else { return }
+                if sessionP1EchoReceived {
+                    ble.timeline.add("セッションP1: 応答候補を検出したため再送を停止")
+                    return
+                }
+                if let audio = lastAudioPacketAt, Date().timeIntervalSince(audio) > 0.4 {
+                    ble.timeline.add("セッションP1: 音声が停止したため再送を停止")
+                    return
+                }
+                var updated = plan
+                updated.sentCount += 1
+                sessionP1Plan = updated
+                ble.sendDebug(preset: .p1, trigger: "セッション確立後P1 再送#\(index)")
+                lastSessionP1SendAt = Date().timeIntervalSince1970
+                sessionP1EchoReceived = false
+            }
+            ble.timeline.add("セッションP1: 再送上限に到達")
+        }
     }
 
     private func evaluate(window: P1ResendWindow?, terminal: UInt8, at: TimeInterval) {

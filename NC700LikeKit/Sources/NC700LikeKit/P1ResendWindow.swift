@@ -16,6 +16,10 @@ public enum CancelRetryConstants {
     public static let legacyWindowSeconds: TimeInterval = 2.0
     /// 1 押下あたりの再送上限。
     public static let maxResends: Int = 1
+    /// 方式6(セッション確立後P1): P1 を送ったあとの最初の再送間隔(秒)。
+    public static let sessionP1ResendInterval: TimeInterval = 0.5
+    /// 方式6(セッション確立後P1): 初回送信後に追加する再送の上限。
+    public static let sessionP1MaxResends: Int = 3
 }
 
 public enum P1ResendDecision: Equatable {

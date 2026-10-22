@@ -34,15 +34,16 @@ final class ButtonEventDetectorTests: XCTestCase {
         XCTAssertEqual(detector.process(value: idle, at: 40), .press)
     }
 
-    func testRapidChangesWithinDebounceWindowCollapsesToSinglePress() {
+    func testRapidChangesWithinPostPressSuppressWindowAreIgnored() {
         var detector = ButtonEventDetector()
         XCTAssertEqual(detector.process(value: idle, at: 0, isInitial: true), .ignored)
         XCTAssertEqual(detector.process(value: pressed, at: 1.0), .press)
+        // 押下発火後約1秒(暫定抑止)内の状態変化(00 06 への戻り含む)は押下扱いしない
         XCTAssertEqual(detector.process(value: idle, at: 1.1), .ignored)
         XCTAssertEqual(detector.process(value: pressed, at: 1.2), .ignored)
-        // デバウンス(300ms)を過ぎた後の変化は、新たな押下として発火する
-        XCTAssertEqual(detector.process(value: idle, at: 1.5), .press)
-        XCTAssertEqual(detector.process(value: pressed, at: 2.0), .press)
+        // 押下から約1秒を過ぎた状態変化は、トグルの次段として発火する
+        XCTAssertEqual(detector.process(value: idle, at: 2.5), .press)
+        XCTAssertEqual(detector.process(value: pressed, at: 3.5), .press)
     }
 
     func testUnknownValueDoesNotCorruptLastKnownState() {

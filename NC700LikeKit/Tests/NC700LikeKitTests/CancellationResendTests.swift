@@ -193,4 +193,33 @@ final class PressTimelineRecorderTests: XCTestCase {
         let text = recorder.copyText(deviceName: "D", connectionRoute: "r", idEstablishedAtPress: true)
         XCTAssertTrue(text.contains("FE03制御"))
     }
+
+    func testWritesAndResponsesAreNumberedAndPaired() {
+        var recorder = PressTimelineRecorder()
+        let connectAt = Date(timeIntervalSince1970: 0)
+        recorder.beginGeneration(connectAt: connectAt)
+        let pressAt = connectAt.addingTimeInterval(2)
+        recorder.markPress("押下検出 state=10 0E", at: pressAt)
+        recorder.addWrite("P1 送信(11B)", seq: 1, date: pressAt.addingTimeInterval(0.016))
+        recorder.addResponse(toWriteSeq: 1, label: "書込完了:成功", date: pressAt.addingTimeInterval(0.029))
+        recorder.add("FE03制御(13B terminal=5E)")
+
+        let text = recorder.copyText(deviceName: "D", connectionRoute: "r", idEstablishedAtPress: true)
+        XCTAssertTrue(text.contains("書込#1 P1 送信(11B)"))
+        XCTAssertTrue(text.contains("書込#1への応答(+13ms) 書込完了:成功"))
+        // 集計ブロック: 書込→応答 pair と音声の有無
+        XCTAssertTrue(text.contains("書込#1: P1 送信(11B)(押下+16ms) 応答: 書込完了:成功 +13ms"))
+        XCTAssertTrue(text.contains("音声: なし"))
+    }
+
+    func testSummaryCountsAudioSpan() {
+        var recorder = PressTimelineRecorder()
+        recorder.beginGeneration(connectAt: Date(timeIntervalSince1970: 0))
+        let pressAt = Date(timeIntervalSince1970: 10)
+        recorder.markPress("押下検出", at: pressAt)
+        recorder.add("FE03音声(232B)") // now() = 実時刻で十分後
+        let text = recorder.copyText(deviceName: "D", connectionRoute: "r", idEstablishedAtPress: true)
+        XCTAssertTrue(text.contains("音声: 押下+"))
+        XCTAssertTrue(text.contains("1件"))
+    }
 }

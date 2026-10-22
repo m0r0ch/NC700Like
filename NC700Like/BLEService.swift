@@ -156,6 +156,12 @@ final class BLEService: NSObject, ObservableObject {
     private(set) var recentControls: [RecentControl] = []
     private var awaitingInitialFE03Report = false
     private var initialFE03ReadAt: Date?
+    /// 時系列の書込連番(sendDebug のたびに増える。応答タグ用)。
+    private var timelineWriteSeq = 0
+    /// 直近の時系列書込(nil なら応答タグなし)。
+    private var lastTimelineWrite: (seq: Int, date: Date, label: String)?
+    /// 前回の 7B61 状態(遷移方向の記録用)。
+    private var last7B61StateHex: String?
 
     /// REQ D-4: 自動送信のモード(画面のピッカーとバインド)。
     @Published var autoSendMode: AutoSendMode = .off
@@ -269,18 +275,19 @@ final class BLEService: NSObject, ObservableObject {
         return lines.joined(separator: "\n")
     }
 
-    /// 直近の FE03 制御パケットの 1 件分(押下処理が参照する)。
+    /// 直近の FE03 制御の 1 件分(押下処理が参照する)。
     var latestControl: RecentControl? { recentControls.last }
 
     /// 制御パケット受信時の共同記録({ID}・時系列・確定フラグ・直近キュー)。
-    private func recordControlPacket(_ bytes: [UInt8], hexAll: String) {
+    /// echoTag は直近の書込(連番)への応答候補として付ける説明(nil で非表示)。
+    private func recordControlPacket(_ bytes: [UInt8], hexAll: String, echoTag: String? = nil) {
         let date = Date()
         guard let terminal = bytes.last else {
             timeline.add("FE03制御(\(bytes.count)B terminalなし)")
             return
         }
         lastControlTerminalHex = String(format: "%02X", terminal)
-        timeline.add("FE03制御(\(bytes.count)B terminal=\(String(format: "%02X", terminal)))")
+        timeline.add("FE03制御(\(bytes.count)B terminal=\(String(format: "%02X", terminal)))\(echoTag.map { " [\($0)]" } ?? "")")
         recentControls.append(RecentControl(date: date, terminal: terminal, hex: hexAll))
         if recentControls.count > 20 {
             recentControls.removeFirst(recentControls.count - 20)
@@ -322,7 +329,9 @@ final class BLEService: NSObject, ObservableObject {
         let hex = data.map { String(format: "%02X", $0) }.joined(separator: " ")
         appendLog(kind: .control, hex: nil, note: "\(trigger) 送信 → \(writeCharacteristic.uuid.uuidString) (\(data.count)B): \(hex)")
         let idText = template.contains("{ID}") ? (idByte.map { String(format: "%02X", $0) } ?? "なし") : "ID不要"
-        timeline.add(String(format: "書込(\(data.count)B {ID}=%@): %@", idText, trigger))
+        timelineWriteSeq += 1
+        lastTimelineWrite = (seq: timelineWriteSeq, date: Date(), label: trigger)
+        timeline.addWrite("\(trigger) (\(data.count)B {ID}=\(idText))", seq: timelineWriteSeq, date: lastTimelineWrite?.date)
         peripheral.writeValue(data, for: writeCharacteristic, type: .withResponse)
     }
 
@@ -863,12 +872,23 @@ extension BLEService: CBPeripheralDelegate {
         if let error = error {
             let nsError = error as NSError
             appendLog(kind: .error, hex: nil, note: "書込失敗 domain=\(nsError.domain) code=\(nsError.code) \(nsError.localizedDescription)")
-            timeline.add("書込完了: 失敗 domain=\(nsError.domain) code=\(nsError.code)")
+            recordWriteCompletion(outcome: "失敗 domain=\(nsError.domain) code=\(nsError.code)")
             completion?(false)
         } else {
             appendLog(kind: .control, hex: nil, note: "書込完了(withResponse)")
-            timeline.add("書込完了: 成功")
+            recordWriteCompletion(outcome: "成功")
             completion?(true)
+        }
+    }
+
+    /// 書込完了を応答として時系列に記録(連番ペア付き)。
+    private func recordWriteCompletion(outcome: String) {
+        let date = Date()
+        if let write = lastTimelineWrite,
+           date.timeIntervalSince(write.date) < 3.0 {
+            timeline.addResponse(toWriteSeq: write.seq, label: "書込完了:\(outcome)", date: date)
+        } else {
+            timeline.add("書込完了:\(outcome)")
         }
     }
 
@@ -889,12 +909,20 @@ extension BLEService: CBPeripheralDelegate {
         if uuid.caseInsensitiveCompare(configuration.audioCharacteristicUUID) == .orderedSame {
             let bytes = [UInt8](data)
             if bytes.count < 64 {
+                let nowDate = Date()
+                var echoTag: String?
+                if let write = lastTimelineWrite {
+                    let lagMs = Int(nowDate.timeIntervalSince(write.date) * 1000)
+                    if lagMs >= 0, lagMs < 2000 {
+                        echoTag = "書込#\(write.seq)への応答?\(lagMs)ms"
+                    }
+                }
                 if awaitingInitialFE03Report {
                     awaitingInitialFE03Report = false
                     timeline.add("FE03初期読み取り: 値あり(\([UInt8](data).count)B)")
                 }
                 let hexAll = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
-                recordControlPacket(bytes, hexAll: hexAll)
+                recordControlPacket(bytes, hexAll: hexAll, echoTag: echoTag)
                 appendLog(kind: .control, hex: hexAll, note: "FE03制御 \(bytes.count)B (末尾=\(lastControlTerminalHex ?? "-"))")
                 eventHub.emit(BLEEvent(date: Date(), kind: .control, bytes: data))
                 maybeAutoSendOnControl()
@@ -920,6 +948,15 @@ extension BLEService: CBPeripheralDelegate {
 
         last7B61Hex = hex
         eventHub.emit(BLEEvent(date: Date(), kind: .notification7B61, bytes: data))
+        // 遷移方向の記録(00 06→10 0E / 10 0E→00 06)。実験Aの材料として全変化を残す。
+        let stateH = stateHex(of: bytes)
+        if !wasInitial, let prev = last7B61StateHex, prev != stateH {
+            let direction = (bytes.count >= configuration.stateOffsetInBytes + configuration.stateLengthInBytes
+                             && Array(bytes[configuration.stateOffsetInBytes..<(configuration.stateOffsetInBytes + configuration.stateLengthInBytes)]) == configuration.pressStates.last)
+                ? "(→押し込み)" : "(→受付待ち)"
+            timeline.add("7B61変化 \(prev)→\(stateH) \(direction)")
+        }
+        last7B61StateHex = stateH
 
         let readCompletion = pending7B61ReadCompletion
         pending7B61ReadCompletion = nil
@@ -940,7 +977,9 @@ extension BLEService: CBPeripheralDelegate {
             lastPressAt = Date()
             startAudioSession()
             eventHub.emit(BLEEvent(date: lastPressAt!, kind: .press, bytes: data))
-            timeline.markPress("押下検出 state=\(stateHex(of: bytes))", at: lastPressAt)
+            let idText = lastControlTerminalHex ?? "—"
+            let idFlag = isControlIDEstablished ? "確定済み" : "未確定"
+            timeline.markPress("押下#\(pressCount) state=\(stateHex(of: bytes)) raw=\(hex) {ID}=\(idText)(\(idFlag))", at: lastPressAt)
             appendLog(kind: .press, hex: hex, note: "押下を検出 (state=\(stateHex(of: bytes)))")
         case .ignored:
             if wasInitial {
