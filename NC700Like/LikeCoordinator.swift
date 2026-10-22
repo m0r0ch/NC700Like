@@ -53,6 +53,13 @@ final class LikeCoordinator: ObservableObject {
     /// 1回のいいね処理の間に検出された押下の数(集約して後続処理する)。
     private var hasPendingPress = false
 
+    /// 押下後の P1 再送(電源入れ直し後の最初の押下で古い {ID} が無効な対策)。
+    /// 押下後まもなく流れるセッション開始の制御パケットを取って、違う {ID} で P1 を1回だけ再送する。
+    /// 期限は押下後 2.0 秒。E10(連続 P1×2)相当の運用。
+    private var cancelSessionUntil: Date?
+    private var p1SentCount = 0
+    private var lastP1Terminal: UInt8?
+
     init(ble: BLEService, spotifyClient: SpotifyClient = .shared) {
         self.ble = ble
         self.spotifyClient = spotifyClient
@@ -69,9 +76,13 @@ final class LikeCoordinator: ObservableObject {
     func attach() {
         guard handlerToken == nil else { return }
         handlerToken = ble.eventHub.addHandler { [weak self] event in
-            guard event.kind == .press else { return }
-            Task { @MainActor in
-                self?.handlePress()
+            switch event.kind {
+            case .press:
+                Task { @MainActor in self?.handlePress() }
+            case .control:
+                Task { @MainActor in self?.handleControl(bytes: event.bytes) }
+            default:
+                break
             }
         }
     }
@@ -96,14 +107,21 @@ final class LikeCoordinator: ObservableObject {
             return
         }
         let backgroundTaskID = BackgroundTaskManager.shared.beginTask(reason: "押下 → いいね処理")
+        p1SentCount = 0
+        lastP1Terminal = nil
+        cancelSessionUntil = nil
         if cancelReceptionOnPress {
             guard ble.controlTerminalByte() != nil else {
                 appendReport(interval: 0, message: "P1 未送信: 制御パケット未受信({ID} 未確定)")
                 BackgroundTaskManager.shared.endTask(backgroundTaskID)
                 return
             }
-            // 受付キャンセルは即送信(.withResponse の完了は待たない)。
+            cancelSessionUntil = Date().addingTimeInterval(2.0)
+            // 受付キャンセルは即送信(.withResponse の完了は待たない)。古い {ID} の可能性もあるため、
+            // 押下後の制御パケットで handleControl が新 {ID} 再送を判定する。
             ble.sendDebug(preset: .p1, trigger: "押下直後の受付キャンセル")
+            p1SentCount = 1
+            lastP1Terminal = ble.controlTerminalByte()
         }
         if isProcessing {
             hasPendingPress = true
@@ -114,6 +132,22 @@ final class LikeCoordinator: ObservableObject {
         isProcessing = true
         let started = Date()
         Task { await runProcessing(startedAt: started, backgroundTaskID: backgroundTaskID) }
+    }
+
+    /// 押下後に流れる FE03 制御パケット。押下後 2.0 秒以内で、押下時に送った P1 の {ID} と
+    /// 異なる末尾バイトのパケットが来たら、新 {ID} で P1 を 1 回だけ再送する。
+    /// (電源入れ直し後の最初の押下に効く。以降は即送信の P1 が効くため再送は動かない。)
+    private func handleControl(bytes: Data) {
+        guard !ble.suppressAutoSend else { return }
+        guard mode == .like, cancelReceptionOnPress else { return }
+        guard let deadline = cancelSessionUntil, Date() < deadline else { return }
+        guard p1SentCount >= 1, p1SentCount < 2 else { return }
+        guard let terminal = bytes.last else { return }
+        guard terminal != lastP1Terminal else { return }
+        cancelSessionUntil = nil
+        p1SentCount += 1
+        lastP1Terminal = terminal
+        ble.sendDebug(preset: .p1, trigger: "押下後の制御パケットで新 {ID} 再送(2回目)")
     }
 
     private func runProcessing(startedAt: Date, backgroundTaskID: UIBackgroundTaskIdentifier) async {
