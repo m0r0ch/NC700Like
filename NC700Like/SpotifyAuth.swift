@@ -269,6 +269,22 @@ final class SpotifyAuth: NSObject, ObservableObject, ASWebAuthenticationPresenta
 
     static func errorText(_ error: Error) -> String {
         switch error {
+        case let SpotifyRequestFailure.http(method, path, status, body):
+            let message = SpotifyJSON.decodeErrorBody(body) ?? "HTTP \(status)"
+            var text = "\(method) /\(path) → \(status): \(message)"
+            // ボディが JSON として解析できなかった場合だけ断片を出す(HTML/テキスト想定)。
+            if SpotifyJSON.decodeErrorBody(body) == nil, !body.isEmpty {
+                if let snippet = String(data: body.prefix(160), encoding: .utf8)?
+                    .replacingOccurrences(of: "\n", with: " ")
+                    .trimmingCharacters(in: .whitespaces),
+                   !snippet.isEmpty,
+                   !snippet.lowercased().contains("token") {
+                    text += " / body: \(snippet)"
+                } else {
+                    text += " / body: (\(body.count) バイト)"
+                }
+            }
+            return text
         case let SpotifyHTTPError.status(code, body):
             let message = SpotifyJSON.decodeErrorBody(body) ?? "HTTP \(code)"
             return "\(code): \(message)"

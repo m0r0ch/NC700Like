@@ -71,7 +71,7 @@ final class SpotifyClient: ObservableObject {
         guard let components = URLComponents(string: "\(Self.apiBase)/me/player/currently-playing") else {
             throw SpotifyAuthError.configuration
         }
-        let (status, data) = try await spotifyRequest(urlRequest: components)
+        let (status, _, data) = try await spotifyRequest(urlRequest: components)
         if status == 204 || data.isEmpty {
             return nil
         }
@@ -79,47 +79,76 @@ final class SpotifyClient: ObservableObject {
     }
 
     /// PUT /me/library?uris=spotify:track:{id}(移行ガイド後の新しいエンドポイント)。
+    /// 空ボディでも Content-Type と Content-Length: 0 を明示して送る(一部のエッジが
+    /// ボディ/ヘッダ無しの PUT を method エラー扱いにした報告があるため)。
     private func saveToLibrary(uri: String) async throws {
         guard var components = URLComponents(string: "\(Self.apiBase)/me/library") else {
             throw SpotifyAuthError.configuration
         }
         components.queryItems = [URLQueryItem(name: "uris", value: uri)]
-        let (status, _) = try await spotifyRequest(urlRequest: components)
+        let (status, _, _) = try await spotifyRequest(
+            urlRequest: components,
+            method: "PUT",
+            body: Data(),
+            contentType: "application/json"
+        )
         guard (200..<300).contains(status) else {
             throw SpotifyAuthError.configuration
         }
     }
 
     /// リトライ方針(設計書5章): 401 はトークン更新して1回だけ再試行。429 は Retry-After に従う(1回待機して再試行)。
-    private func spotifyRequest(urlRequest components: URLComponents) async throws -> (Int, Data) {
+    /// 失敗時はメソッド/パス/本文を含む診断エラーを投げる(トークンは含まない)。
+    private func spotifyRequest(
+        urlRequest components: URLComponents,
+        method: String? = nil,
+        body: Data? = nil,
+        contentType: String? = nil
+    ) async throws -> (Int, URLResponse, Data) {
         guard let url = components.url else {
             throw SpotifyAuthError.configuration
         }
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
+        if let method { request.httpMethod = method }
+        if let body { request.httpBody = body }
+        if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
+        let path = url.path.replacingOccurrences(of: "/v1", with: "")
         var token = try await auth.ensureValidAccessToken()
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         var (data, response) = try await session.data(for: request)
-        var status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        var http = response as? HTTPURLResponse
+        var status = http?.statusCode ?? 0
 
         if status == 401 {
             token = try await auth.refreshAccessToken()
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             (data, response) = try await session.data(for: request)
-            status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            http = response as? HTTPURLResponse
+            status = http?.statusCode ?? 0
         }
 
         if status == 429,
-           let retryAfter = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After"),
+           let retryAfter = http?.value(forHTTPHeaderField: "Retry-After"),
            let seconds = TimeInterval(retryAfter), seconds <= 60 {
             try? await Task.sleep(nanoseconds: UInt64((seconds + 1) * 1_000_000_000))
             (data, response) = try await session.data(for: request)
-            status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            http = response as? HTTPURLResponse
+            status = http?.statusCode ?? 0
         }
 
         guard (200..<300).contains(status) else {
-            throw SpotifyHTTPError.status(code: status, body: data)
+            throw SpotifyRequestFailure.http(
+                method: method ?? "GET",
+                path: path,
+                status: status,
+                body: data
+            )
         }
-        return (status, data)
+        return (status, response, data)
     }
+}
+
+enum SpotifyRequestFailure: Error {
+    case http(method: String, path: String, status: Int, body: Data)
 }
