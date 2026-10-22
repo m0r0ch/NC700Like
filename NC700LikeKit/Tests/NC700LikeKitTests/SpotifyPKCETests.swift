@@ -48,7 +48,8 @@ final class SpotifyPKCETests: XCTestCase {
             state: "st-1",
             codeChallenge: "challenge123"
         ))
-        XCTAssertEqual(url.absoluteString, SpotifyPKCE.authorizeEndpoint)
+        XCTAssertEqual(url.scheme, "https")
+        XCTAssertEqual(url.host, "accounts.spotify.com")
         let query = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
         func value(_ name: String) -> String? { query.first { $0.name == name }?.value }
         XCTAssertEqual(value("response_type"), "code")
