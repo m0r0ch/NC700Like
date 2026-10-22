@@ -187,10 +187,8 @@ final class LikeCoordinator: ObservableObject {
         }
         while true {
             hasPendingPress = false
-            ble.timeline.add("Spotify 呼出開始")
             let result = await spotifyClient.likeCurrentTrack()
             let interval = Date().timeIntervalSince(started)
-            ble.timeline.add("Spotify 結果: \(result.message)")
             if case .saved = result {
                 likeCount += 1
             }

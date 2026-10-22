@@ -605,8 +605,8 @@ final class BLEService: NSObject, ObservableObject {
 
     private func appendLog(kind: BLELogEntry.Kind, hex: String?, note: String) {
         logs.insert(BLELogEntry(date: Date(), kind: kind, hex: hex, note: note), at: 0)
-        if logs.count > 300 {
-            logs.removeLast(logs.count - 300)
+        if logs.count > 100 {
+            logs.removeLast(logs.count - 100)
         }
     }
 
@@ -788,9 +788,11 @@ extension BLEService: CBPeripheralDelegate {
             serviceCatalog.append(entry)
         }
 
-        var traitLines: [String] = []
         for characteristic in chars {
-            traitLines.append("\(characteristic.uuid.uuidString) [\(propertiesText(characteristic.properties))]")
+            appendLog(
+                kind: .discovery, hex: nil,
+                note: "特性 \(characteristic.uuid.uuidString)(\(service.uuid.uuidString)) [\(propertiesText(characteristic.properties))]"
+            )
             let uuid = characteristic.uuid.uuidString.uppercased()
             if uuid.caseInsensitiveCompare(configuration.characteristicUUID) == .orderedSame {
                 if !characteristic.isNotifying {
@@ -811,10 +813,6 @@ extension BLEService: CBPeripheralDelegate {
             if uuid.caseInsensitiveCompare(configuration.characteristicUUID) == .orderedSame {
                 notify7B61 = characteristic
             }
-        }
-        // 特性一覧は1接続あたり1行に畳む(昔は1特性=1行で約35行消費し、押下の記録を押し出していた)。
-        if !traitLines.isEmpty {
-            appendLog(kind: .discovery, hex: nil, note: "特性一覧 \(service.uuid.uuidString): \(traitLines.joined(separator: "; "))")
         }
     }
 
