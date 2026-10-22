@@ -22,6 +22,8 @@ struct ContentView: View {
             List {
                 statusSection
 
+                verificationSection
+
                 spotifyConnectionSection
 
                 likeSection
@@ -66,6 +68,35 @@ struct ContentView: View {
     }
 
     // MARK: - Sections(bodyの型検査を軽くするため分割)
+
+    /// 実機確認チェックリスト(初回押下の受付キャンセル問題の検証用)。
+    @ViewBuilder
+    private var verificationSection: some View {
+        Section {
+            Text("□ 電源の入れ直し(または Bluetooth OFF/ON)→「手動で再接続 / スキャン」")
+            Text("□ 接続完了後、ボタンを最初の1回だけ押下")
+            Text("□ Alexa の受付がキャンセルされるか(即マイク終了)を確認")
+            Text("□ 下の「時系列をコピー」をタップして貼り付けて報告")
+            Text("□ 念のため 2 回目の押下も確認(本来は必ずキャンセルされる)")
+            Button("時系列をコピー") {
+                UIPasteboard.general.string = ble.timeline.copyText(
+                    deviceName: ble.lastDiscoveredName ?? "Bose NC 700",
+                    connectionRoute: ble.connectionRoute,
+                    idEstablishedAtPress: ble.isControlIDEstablished
+                )
+            }
+            HStack {
+                Text("時系列イベント数")
+                Spacer()
+                Text("\(ble.timeline.eventCount)")
+                    .monospacedDigit()
+            }
+        } header: {
+            Text("⚠️ 実機確認チェックリスト(まずここ見てください)")
+        } footer: {
+            Text("各方式を切り替えてこの手順を 3 回ずつ試してください。時系列コピーには 接続/押下/書込({ID})/FE03 制御パケット/切断 の経過ミリ秒付き記録が入ります。追加の報告: 現在の「連携方式」名・いいね連携セクションの結果行・BLE ログ(ログセクションのコピー)。")
+        }
+    }
 
     @ViewBuilder
     private var statusSection: some View {
@@ -167,6 +198,13 @@ struct ContentView: View {
             }
             .pickerStyle(.menu)
             Toggle("押下直後に P1 で受付をキャンセル", isOn: $likeCoordinator.cancelReceptionOnPress)
+            Picker("再送方式", selection: $likeCoordinator.strategy) {
+                ForEach(LikeCoordinator.CancelStrategy.allCases) { strategy in
+                    Text(strategy.rawValue).tag(strategy)
+                }
+            }
+            .pickerStyle(.menu)
+            .disabled(!likeCoordinator.cancelReceptionOnPress)
             HStack {
                 Text("いいね済み(本アプリ経由)")
                 Spacer()

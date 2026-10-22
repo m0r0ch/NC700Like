@@ -135,6 +135,28 @@ final class BLEService: NSObject, ObservableObject {
     /// REQ D-2: 直近の制御パケット末尾1バイト({ID}の置換元)。
     @Published private(set) var lastControlTerminalHex: String?
 
+    /// 電源入れ直し対策(Phase 4): この接続世代で制御パケットを受けて {ID} が確定しているか。
+    /// 接続のたびに false に戻し、新しい制御パケットを受信した時点で true になる。
+    @Published private(set) var isControlIDEstablished = false
+
+    /// 接続世代番号(connect()/復元のたびに+1。時系列のヘッダに出す)。
+    private(set) var connectionGeneration = 0
+
+    /// 押下時系列レコーダ(Step A)。全モードで BLE イベント・書込・再送判定を記録する。
+    let timeline = PressTimelineRecorder()
+
+    /// 直近の FE03 制御パケット(時刻つき)。押下処理と制御パケット受信の
+    /// イベント順序の揺れ(.press の Task が .control より後で処理される等)を
+    /// 吸収するため、押下処理時に直前の制御パケットを参照できるようにする。
+    struct RecentControl: Equatable {
+        let date: Date
+        let terminal: UInt8
+        let hex: String
+    }
+    private(set) var recentControls: [RecentControl] = []
+    private var awaitingInitialFE03Report = false
+    private var initialFE03ReadAt: Date?
+
     /// REQ D-4: 自動送信のモード(画面のピッカーとバインド)。
     @Published var autoSendMode: AutoSendMode = .off
 
@@ -247,6 +269,36 @@ final class BLEService: NSObject, ObservableObject {
         return lines.joined(separator: "\n")
     }
 
+    /// 直近の FE03 制御パケットの 1 件分(押下処理が参照する)。
+    var latestControl: RecentControl? { recentControls.last }
+
+    /// 制御パケット受信時の共同記録({ID}・時系列・確定フラグ・直近キュー)。
+    private func recordControlPacket(_ bytes: [UInt8], hexAll: String) {
+        let date = Date()
+        guard let terminal = bytes.last else {
+            timeline.add("FE03制御(\(bytes.count)B terminalなし)")
+            return
+        }
+        lastControlTerminalHex = String(format: "%02X", terminal)
+        timeline.add("FE03制御(\(bytes.count)B terminal=\(String(format: "%02X", terminal)))")
+        recentControls.append(RecentControl(date: date, terminal: terminal, hex: hexAll))
+        if recentControls.count > 20 {
+            recentControls.removeFirst(recentControls.count - 20)
+        }
+        if !isControlIDEstablished {
+            isControlIDEstablished = true
+            timeline.add("制御パケット受信で {ID} 確定(この接続世代で初回)")
+        }
+    }
+
+    /// 押下処理から参照する、押下直前(指定秒以内)の制御パケットのうち末尾 ID が違う最初の 1 件。
+    /// (.press のイベント処理順序の揺れで window 設定前に制御パケットを取り逃すことがあるため。)
+    func freshControlNearPress(pressAt: Date, lookbackSeconds: TimeInterval) -> RecentControl? {
+        let cutoff = pressAt.addingTimeInterval(-lookbackSeconds)
+        let bounds = pressAt.addingTimeInterval(lookbackSeconds)
+        return recentControls.first { $0.date >= cutoff && $0.date <= bounds }
+    }
+
     /// REQ D-1: 手動送信(.withResponse)。エラー/成功はログに出す。
     func sendDebug(preset: DebugPreset? = nil, hexString: String? = nil, trigger: String) {
         guard let peripheral, peripheral.state == .connected else {
@@ -262,12 +314,15 @@ final class BLEService: NSObject, ObservableObject {
             appendLog(kind: .error, hex: nil, note: "送信不可(HEXが空)")
             return
         }
-        guard let data = HexTool.parse(template, idByte: controlTerminalByte()) else {
+        let idByte = controlTerminalByte()
+        guard let data = HexTool.parse(template, idByte: idByte) else {
             appendLog(kind: .error, hex: nil, note: "送信不可(HEX解析失敗: \(template) / 直近ID=\(lastControlTerminalHex ?? "なし"))")
             return
         }
         let hex = data.map { String(format: "%02X", $0) }.joined(separator: " ")
         appendLog(kind: .control, hex: nil, note: "\(trigger) 送信 → \(writeCharacteristic.uuid.uuidString) (\(data.count)B): \(hex)")
+        let idText = template.contains("{ID}") ? (idByte.map { String(format: "%02X", $0) } ?? "なし") : "ID不要"
+        timeline.add(String(format: "書込(\(data.count)B {ID}=%@): %@", idText, trigger))
         peripheral.writeValue(data, for: writeCharacteristic, type: .withResponse)
     }
 
@@ -424,6 +479,13 @@ final class BLEService: NSObject, ObservableObject {
         audioLoggedInSession = 0
         lastAutoSentPreset = nil
         connectionRoute = route
+        // 電源入れ直し対策: 接続のたびに {ID} を未確定に戻し、時系列を新世代で開始する。
+        connectionGeneration += 1
+        isControlIDEstablished = false
+        recentControls.removeAll()
+        awaitingInitialFE03Report = false
+        timeline.beginGeneration(connectAt: Date())
+        timeline.add("接続開始 経路=\(route) id=\(p.identifier.uuidString.prefix(8)) state=\(stateName(p.state))")
         UserDefaults.standard.set(p.identifier.uuidString, forKey: savedIdentifierKey)
 
         if p.state == .connected {
@@ -526,6 +588,12 @@ final class BLEService: NSObject, ObservableObject {
         if maintenanceCounter >= 5 {
             maintenanceCounter = 0
             maintenanceTick()
+        }
+        // FE03 初期読み取りの応答確認(6秒無応答なら観測結果として時系列に記録)
+        if awaitingInitialFE03Report, let asked = initialFE03ReadAt,
+           Date().timeIntervalSince(asked) > 6 {
+            awaitingInitialFE03Report = false
+            timeline.add("FE03初期読み取り: 6秒間無応答(read 非対応の可能性。{ID} は次の制御パケットまで未確定)")
         }
     }
 
@@ -648,6 +716,7 @@ extension BLEService: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         awaitingConnection = false
         appendLog(kind: .connection, hex: nil, note: "didConnect 受信 [経路: \(connectionRoute)]")
+        timeline.add("didConnect 受信")
         peripheral.delegate = self
         serviceCatalog = []
         peripheral.discoverServices(nil)
@@ -670,6 +739,7 @@ extension BLEService: CBCentralManagerDelegate {
         eventHub.emit(BLEEvent(date: Date(), kind: .disconnected, bytes: Data()))
         let nsError = error as NSError?
         appendLog(kind: .connection, hex: nil, note: "切断 domain=\(nsError?.domain ?? "-") code=\(nsError?.code ?? -1) state=\(stateName(peripheral.state))")
+        timeline.add("切断 domain=\(nsError?.domain ?? "-") code=\(nsError?.code ?? -1)")
         phase = .idle(device: "接続が切れました — 即座に保留接続を再設定します")
         cancelRetry()
         if peripheral.state == .disconnected {
@@ -684,6 +754,12 @@ extension BLEService: CBCentralManagerDelegate {
             peripheral = first
             first.delegate = self
             awaitingConnection = false
+            connectionGeneration += 1
+            isControlIDEstablished = false
+            recentControls.removeAll()
+            awaitingInitialFE03Report = false
+            timeline.beginGeneration(connectAt: Date())
+            timeline.add("状態復元(バックグラウンド再起動) id=\(first.identifier.uuidString.prefix(8))")
             UserDefaults.standard.set(first.identifier.uuidString, forKey: savedIdentifierKey)
             appendLog(kind: .connection, hex: nil, note: "状態復元: 周辺機器 \(first.identifier.uuidString.prefix(8)) を取得。GATT探索をやり直します(REQ B-8)")
             resolveServiceDiscovery(for: first)
@@ -765,10 +841,14 @@ extension BLEService: CBPeripheralDelegate {
         if uuid.caseInsensitiveCompare(configuration.characteristicUUID) == .orderedSame {
             subscribed7B61 = characteristic.isNotifying
             appendLog(kind: .connection, hex: nil, note: "7B61購読: \(characteristic.isNotifying ? "開始" : "停止")")
+            timeline.add("7B61購読\(characteristic.isNotifying ? "開始" : "停止")")
         } else if uuid.caseInsensitiveCompare(configuration.audioCharacteristicUUID) == .orderedSame {
             subscribedFE03 = characteristic.isNotifying
             appendLog(kind: .connection, hex: nil, note: "FE03購読: \(characteristic.isNotifying ? "開始" : "停止")")
+            timeline.add("FE03購読\(characteristic.isNotifying ? "開始" : "停止")(直後に初期読み取り)")
             if characteristic.isNotifying {
+                awaitingInitialFE03Report = true
+                initialFE03ReadAt = Date()
                 // 電源入れ直し後の再接続では制御パケット({ID} の置換元)が来るまで待つ必要がある。
                 // 購読開始直後に1回読み、直近値が読めれば {ID} を早期に確定させる(Phase 4: 再接続後の即時キャンセル用)。
                 peripheral.readValue(for: characteristic)
@@ -783,33 +863,45 @@ extension BLEService: CBPeripheralDelegate {
         if let error = error {
             let nsError = error as NSError
             appendLog(kind: .error, hex: nil, note: "書込失敗 domain=\(nsError.domain) code=\(nsError.code) \(nsError.localizedDescription)")
+            timeline.add("書込完了: 失敗 domain=\(nsError.domain) code=\(nsError.code)")
             completion?(false)
         } else {
             appendLog(kind: .control, hex: nil, note: "書込完了(withResponse)")
+            timeline.add("書込完了: 成功")
             completion?(true)
         }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        let uuid = characteristic.uuid.uuidString.uppercased()
         if let error = error {
             appendLog(kind: .error, hex: nil, note: "値取得エラー(\(characteristic.uuid.uuidString)): \(error.localizedDescription)")
+            timeline.add("\(characteristic.uuid.uuidString) 値取得エラー: \(error.localizedDescription)")
+            if uuid.caseInsensitiveCompare(configuration.audioCharacteristicUUID) == .orderedSame, awaitingInitialFE03Report {
+                awaitingInitialFE03Report = false
+                timeline.add("FE03初期読み取り: エラー(FE03 が read 非対応の可能性。{ID} は次の制御パケットまで未確定)")
+            }
             return
         }
         guard let data = characteristic.value else { return }
-        let uuid = characteristic.uuid.uuidString.uppercased()
 
         // REQ C-1: <64B は制御で毎回全バイト。>=100B は音声でセッション頭5個だけ。
         if uuid.caseInsensitiveCompare(configuration.audioCharacteristicUUID) == .orderedSame {
             let bytes = [UInt8](data)
             if bytes.count < 64 {
+                if awaitingInitialFE03Report {
+                    awaitingInitialFE03Report = false
+                    timeline.add("FE03初期読み取り: 値あり(\([UInt8](data).count)B)")
+                }
                 let hexAll = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
-                lastControlTerminalHex = bytes.last.map { String(format: "%02X", $0) }
+                recordControlPacket(bytes, hexAll: hexAll)
                 appendLog(kind: .control, hex: hexAll, note: "FE03制御 \(bytes.count)B (末尾=\(lastControlTerminalHex ?? "-"))")
                 eventHub.emit(BLEEvent(date: Date(), kind: .control, bytes: data))
                 maybeAutoSendOnControl()
                 return
             }
             audioPacketTotal += 1
+            timeline.add("FE03音声(\(bytes.count)B)")
             eventHub.emit(BLEEvent(date: Date(), kind: .audio, bytes: data))
             if bytes.count >= 100 && audioLoggedInSession < 5 {
                 let head = bytes.prefix(16).map { String(format: "%02X", $0) }.joined(separator: " ")
@@ -847,7 +939,8 @@ extension BLEService: CBPeripheralDelegate {
             pressCount += 1
             lastPressAt = Date()
             startAudioSession()
-            eventHub.emit(BLEEvent(date: Date(), kind: .press, bytes: data))
+            eventHub.emit(BLEEvent(date: lastPressAt!, kind: .press, bytes: data))
+            timeline.markPress("押下検出 state=\(stateHex(of: bytes))", at: lastPressAt)
             appendLog(kind: .press, hex: hex, note: "押下を検出 (state=\(stateHex(of: bytes)))")
         case .ignored:
             if wasInitial {
