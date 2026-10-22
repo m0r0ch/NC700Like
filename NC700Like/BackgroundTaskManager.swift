@@ -13,7 +13,8 @@ final class BackgroundTaskManager: ObservableObject {
     /// 実行時間の確保。戻り値の Identifier を endTask に渡して必ず解放すること。
     @discardableResult
     func beginTask(reason: String = "NC700Like 処理") -> UIBackgroundTaskIdentifier {
-        let retained = UIApplication.shared.beginBackgroundTask(withName: reason) {
+        var retained = UIBackgroundTaskIdentifier.invalid
+        retained = UIApplication.shared.beginBackgroundTask(withName: reason) {
             Task { @MainActor in self.endTask(retained) }
         }
         identifiers.append(retained)
