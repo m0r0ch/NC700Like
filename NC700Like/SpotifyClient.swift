@@ -13,6 +13,7 @@ final class SpotifyClient: ObservableObject {
 
     enum LikeResult: Equatable {
         case saved(String)
+        case alreadySaved(String)
         case nothingPlaying
         case notTrack(kind: String)
         case notLoggedIn
@@ -21,6 +22,7 @@ final class SpotifyClient: ObservableObject {
         var message: String {
             switch self {
             case .saved(let title): "いいね追加: \(title)"
+            case .alreadySaved(let title): "既にいいね済みのため追加しません: \(title)"
             case .nothingPlaying: "再生中の曲なし"
             case .notTrack(let kind): "曲以外のため保存しません(kind=\(kind))"
             case .notLoggedIn: "Spotify に未ログインです。上のボタンでログインしてください。"
@@ -57,6 +59,10 @@ final class SpotifyClient: ObservableObject {
             case .other(let kind):
                 return .notTrack(kind: kind)
             case .track(_, let uri, let name, let artists):
+                if try await isAlreadySaved(uri: uri) {
+                    let display = artists.isEmpty ? name : "\(name) - \(artists.joined(separator: ", "))"
+                    return .alreadySaved(display)
+                }
                 try await saveToLibrary(uri: uri)
                 let display = artists.isEmpty ? name : "\(name) - \(artists.joined(separator: ", "))"
                 return .saved(display)
@@ -76,6 +82,17 @@ final class SpotifyClient: ObservableObject {
             return nil
         }
         return try SpotifyJSON.decodeCurrentlyPlaying(data)
+    }
+
+    /// GET /me/library/contains?uris=... で既に保存済みか確認(ライブラリの追加順を壊さないため)。
+    private func isAlreadySaved(uri: String) async throws -> Bool {
+        guard var components = URLComponents(string: "\(Self.apiBase)/me/library/contains") else {
+            throw SpotifyAuthError.configuration
+        }
+        components.queryItems = [URLQueryItem(name: "uris", value: uri)]
+        let (_, _, data) = try await spotifyRequest(urlRequest: components)
+        let flags = try SpotifyJSON.decodeLibraryContains(data)
+        return flags.first ?? false
     }
 
     /// PUT /me/library?uris=spotify:track:{id}(移行ガイド後の新しいエンドポイント)。

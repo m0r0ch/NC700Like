@@ -120,4 +120,15 @@ final class SpotifyModelsTests: XCTestCase {
         XCTAssertEqual(SpotifyJSON.decodeErrorBody(Data(#"{"error":{"status":400,"message":"msg","reason":"r1"}}"#.utf8)), "msg (r1)")
         XCTAssertNil(SpotifyJSON.decodeErrorBody(Data("{}".utf8)))
     }
+
+    func testDecodeLibraryContains() throws {
+        XCTAssertEqual(try SpotifyJSON.decodeLibraryContains(Data("[true]".utf8)), [true])
+        XCTAssertEqual(try SpotifyJSON.decodeLibraryContains(Data("[false]".utf8)), [false])
+        XCTAssertEqual(try SpotifyJSON.decodeLibraryContains(Data("[false,true]".utf8)), [false, true])
+        XCTAssertEqual(try SpotifyJSON.decodeLibraryContains(Data("[]".utf8)), [])
+    }
+
+    func testDecodeLibraryContainsInvalid() throws {
+        XCTAssertThrowsError(try SpotifyJSON.decodeLibraryContains(Data(#"{"error":{"status":400}}"#.utf8)))
+    }
 }

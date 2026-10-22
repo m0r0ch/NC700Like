@@ -58,6 +58,20 @@ public enum SpotifyJSON {
         return SpotifyCurrentlyPlaying(itemKind: .track(id: id, uri: uri, name: name, artists: artists), isPlaying: isPlaying)
     }
 
+    /// GET /me/library/contains のレスポンス(uris順に対応するbool配列)。
+    public static func decodeLibraryContains(_ data: Data) throws -> [Bool] {
+        let root = try JSONSerialization.jsonObject(with: data)
+        guard let array = root as? [Any] else {
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(
+                    codingPath: [],
+                    debugDescription: "contains response is not an array"
+                )
+            )
+        }
+        return array.map { ($0 as? Bool) ?? false }
+    }
+
     public static func decodeErrorBody(_ data: Data) -> String? {
         guard
             let root = try? JSONSerialization.jsonObject(with: data),

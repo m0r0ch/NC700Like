@@ -9,7 +9,7 @@ public enum SpotifyPKCE {
     /// RFC 7636 §4.1: 43〜128 文字。アルファベット/数字/._~- を使用。
     public static let verifierCharacters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
 
-    public static let defaultScopes = "user-read-currently-playing user-library-modify"
+    public static let defaultScopes = "user-read-currently-playing user-library-modify user-library-read"
 
     /// code verifier を生成する(SystemRandomNumberGenerator は暗号論的に安全)。
     public static func generateCodeVerifier(length: Int = 64) -> String {
