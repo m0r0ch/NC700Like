@@ -174,9 +174,13 @@ final class PressTimelineRecorderTests: XCTestCase {
         recorder.add("新世代の記録")
 
         let text = recorder.copyText(deviceName: "D", connectionRoute: "r", idEstablishedAtPress: false)
-        XCTAssertFalse(text.contains("旧世代の記録"))
-        XCTAssertTrue(text.contains("新世代の記録"))
-        XCTAssertTrue(text.contains("未確定"))
+        XCTAssertTrue(text.contains("直近の押下なし"))
+        // 押下が登録されると、押下起点以降のイベントが出力される。
+        recorder.markPress("押下検出", at: Date(timeIntervalSince1970: 200))
+        let textWithPress = recorder.copyText(deviceName: "D", connectionRoute: "r", idEstablishedAtPress: false)
+        XCTAssertFalse(textWithPress.contains("旧世代の記録"))
+        XCTAssertTrue(textWithPress.contains("新世代の記録"))
+        XCTAssertTrue(textWithPress.contains("未確定"))
     }
 
     func testMarkPressAlignsBackdatedEvents() throws {
