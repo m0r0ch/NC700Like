@@ -133,13 +133,30 @@ public final class PressTimelineRecorder {
         var lines = header(deviceName: deviceName, connectionRoute: connectionRoute, terminalAtPress: terminalAtPress, hasPress: true)
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
-        for event in events[pressIndex...] {
-            let fromPress = relativeMS(event.date, from: pressStart)
-            let fromConnect = relativeMS(event.date, from: connectAt)
-            lines.append("\(fromConnect)ms(押下\(fromPress)ms) \(event.label)")
+
+        // 同一ラベルの連続行(FE03 音声パケットの連続通知など)は1行に畳む(音声が169行になり
+        // 重要な行を押し出すことがあったため)。末尾に「×N」を付けて重複件数を明示する。
+        for run in collapseRuns(Array(events[pressIndex...])) {
+            let fromPress = relativeMS(run.representative.date, from: pressStart)
+            let fromConnect = relativeMS(run.representative.date, from: connectAt)
+            let repeatText = run.count > 1 ? " ×\(run.count)" : ""
+            lines.append("\(fromConnect)ms(押下\(fromPress)ms) \(run.representative.label)\(repeatText)")
         }
         lines.append(contentsOf: summaryLines(pressStart: pressStart, eventsFromPress: Array(events[pressIndex...])))
         return lines.joined(separator: "\n")
+    }
+
+    /// 連続する同一ラベルをまとめる(時刻は最初の1件を使う)。
+    private func collapseRuns(_ source: [Event]) -> [(representative: Event, count: Int)] {
+        var result: [(representative: Event, count: Int)] = []
+        for event in source {
+            if let last = result.last, last.representative.label == event.label {
+                result[result.count - 1].count += 1
+            } else {
+                result.append((event, 1))
+            }
+        }
+        return result
     }
 
     /// 集計ブロック: セッション指標(音声の開始/終了/継続)と書込→応答の pair。

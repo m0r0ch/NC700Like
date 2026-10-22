@@ -85,4 +85,20 @@ final class PressTimelineRecorderTests: XCTestCase {
         XCTAssertTrue(text.contains("音声: 押下+"))
         XCTAssertTrue(text.contains("1件"))
     }
+
+    func testConsecutiveIdenticalLinesAreCollapsed() throws {
+        let recorder = PressTimelineRecorder()
+        recorder.beginGeneration(connectAt: Date(timeIntervalSince1970: 0))
+        let pressAt = Date(timeIntervalSince1970: 10)
+        recorder.markPress("押下検出", at: pressAt)
+        for _ in 0..<169 {
+            recorder.add("FE03音声(232B)")
+        }
+        recorder.add("実験ログ: 押下→音声停止 0.50 秒 成功")
+        let text = copyText(recorder)
+        // 音声の連続169行は1行に畳む(重要な実験ログ行が押し出されない)。
+        let audioLine = try XCTUnwrap(text.split(separator: "\n").first { $0.contains("FE03音声(232B)") })
+        XCTAssertTrue(audioLine.contains("×169"))
+        XCTAssertTrue(text.contains("実験ログ: 押下→音声停止 0.50 秒 成功"))
+    }
 }
