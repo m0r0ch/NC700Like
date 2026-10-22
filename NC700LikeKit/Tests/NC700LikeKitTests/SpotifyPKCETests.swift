@@ -58,7 +58,7 @@ final class SpotifyPKCETests: XCTestCase {
         XCTAssertEqual(value("state"), "st-1")
         XCTAssertEqual(value("code_challenge_method"), "S256")
         XCTAssertEqual(value("code_challenge"), "challenge123")
-        XCTAssertEqual(value("scope"), "user-read-currently-playing user-library-modify")
+        XCTAssertEqual(value("scope"), "user-read-currently-playing user-library-modify user-library-read")
     }
 
     func testMakeStateIsURLSafeAndUnique() {
