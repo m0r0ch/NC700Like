@@ -103,6 +103,9 @@ enum BLEConnectionPhase: Equatable {
 final class BLEService: NSObject, ObservableObject {
     static let restorationIdentifier = "jp.nc700like.BLEService"
 
+    /// RelayCoordinator から参照する共有インスタンス(App は1つの CBCentralManager のみ)。
+    static let shared = BLEService()
+
     @Published private(set) var phase: BLEConnectionPhase = .idle(device: "Bluetooth 初期化中")
     @Published private(set) var logs: [BLELogEntry] = []
     @Published private(set) var pressCount = 0

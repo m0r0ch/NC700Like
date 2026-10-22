@@ -2,12 +2,19 @@ import SwiftUI
 import UIKit
 
 struct ContentView: View {
-    @StateObject private var ble = BLEService()
+    @StateObject private var ble: BLEService
     @StateObject private var spotify = SpotifyAuth.shared
     @StateObject private var spotifyClient = SpotifyClient.shared
+    @StateObject private var likeCoordinator: LikeCoordinator
     @State private var debugHex = DebugPreset.p1.template
     @State private var clientIDInput = ""
     @State private var clientIDInitialized = false
+
+    init() {
+        let bleForCoordinator = BLEService.shared
+        _ble = StateObject(wrappedValue: bleForCoordinator)
+        _likeCoordinator = StateObject(wrappedValue: LikeCoordinator(ble: bleForCoordinator))
+    }
 
     var body: some View {
         NavigationStack {
@@ -37,12 +44,6 @@ struct ContentView: View {
                         .font(.system(size: 12, design: .monospaced))
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
-                        .onAppear {
-                            if !clientIDInitialized {
-                                clientIDInput = spotify.clientID
-                                clientIDInitialized = true
-                            }
-                        }
                         .onChange(of: clientIDInput) { _, newValue in
                             spotify.clientID = newValue.trimmingCharacters(in: .whitespaces)
                         }
@@ -100,6 +101,49 @@ struct ContentView: View {
                             .font(.caption)
                             .textSelection(.enabled)
                     }
+                }
+
+                Section {
+                    Picker("連携", selection: $likeCoordinator.mode) {
+                        ForEach(LikeCoordinator.Mode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    Toggle("押下直後に P1 で受付をキャンセル", isOn: $likeCoordinator.cancelReceptionOnPress)
+                    HStack {
+                        Text("いいね済み(本アプリ経由)")
+                        Spacer()
+                        Text("\(likeCoordinator.likeCount) 件")
+                            .monospacedDigit()
+                    }
+                    if likeCoordinator.isProcessing {
+                        Text("いいね処理中…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(likeCoordinator.reports) { report in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text(report.date, style: .time)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Text(report.elapsedText)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            Text(report.message)
+                                .font(.caption)
+                                .foregroundStyle(report.isHighlighted ? Color.green : Color.primary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                } header: {
+                    Text("押下 → いいね連携(Phase 3)")
+                } footer: {
+                    Text("ヘッドホンのアシスタントボタンを押すと、直後に P1 で Alexa の受付をキャンセルし、Spotify の再生中の曲を Liked Songs に追加します(押下〜完了の所要を表示)。結果は直近10件。実験モード中は連携を停止します。")
                 }
 
                 Section {
@@ -297,6 +341,13 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("NC700Like 診断")
+            .onAppear {
+                likeCoordinator.attach()
+                if !clientIDInitialized {
+                    clientIDInput = spotify.clientID
+                    clientIDInitialized = true
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     HStack(spacing: 8) {
