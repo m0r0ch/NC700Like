@@ -352,7 +352,6 @@ struct ContentView: View {
             }
             Text(report.message)
                 .font(.caption)
-                .foregroundStyle(report.isHighlighted ? Color.green : Color.primary)
                 .textSelection(.enabled)
         }
     }
