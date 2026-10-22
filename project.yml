@@ -26,6 +26,10 @@ targets:
         CFBundleDisplayName: NC700Like
         UILaunchScreen: {}
         NSBluetoothAlwaysUsageDescription: Bose NC700 のアシスタントボタンの押下を検出するためにBluetoothを使用します。
+        CFBundleURLTypes:
+          - CFBundleURLName: nc700like
+            CFBundleURLSchemes:
+              - nc700like
         UIBackgroundModes:
           - bluetooth-central
   BLEScanMin:

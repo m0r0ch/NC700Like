@@ -3,7 +3,11 @@ import UIKit
 
 struct ContentView: View {
     @StateObject private var ble = BLEService()
+    @StateObject private var spotify = SpotifyAuth.shared
+    @StateObject private var spotifyClient = SpotifyClient.shared
     @State private var debugHex = DebugPreset.p1.template
+    @State private var clientIDInput = ""
+    @State private var clientIDInitialized = false
 
     var body: some View {
         NavigationStack {
@@ -25,6 +29,76 @@ struct ContentView: View {
                     diagnosticRow("FE03 購読", value: ble.subscribedFE03 ? "FE03購読済み ✓" : "—")
                     Button("手動で再接続 / スキャン") {
                         ble.connectExplicit()
+                    }
+                }
+
+                Section("Spotify") {
+                    TextField("Client ID(Spotify デベロッパーダッシュボード)", text: $clientIDInput)
+                        .font(.system(size: 12, design: .monospaced))
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .onAppear {
+                            if !clientIDInitialized {
+                                clientIDInput = spotify.clientID
+                                clientIDInitialized = true
+                            }
+                        }
+                        .onChange(of: clientIDInput) { _, newValue in
+                            spotify.clientID = newValue.trimmingCharacters(in: .whitespaces)
+                        }
+                    HStack {
+                        Button(spotify.isLoggedIn ? "ログイン済み(再ログイン)" : "Spotify にログイン") {
+                            spotify.startLogin()
+                        }
+                        .disabled(spotify.loginState == .inProgress || clientIDInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                        if spotify.isLoggedIn {
+                            Button("ログアウト", role: .destructive) {
+                                spotify.logout()
+                            }
+                        }
+                    }
+                    if spotify.loginState == .inProgress {
+                        HStack {
+                            Text("認可画面中表示中")
+                                .foregroundStyle(.secondary)
+                            Button("キャンセル") {
+                                spotify.cancelLogin()
+                            }
+                        }
+                    }
+                    Text("スコープ: \(SpotifyAuth.scopes)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    Text("リダイレクトURI: \(SpotifyAuth.redirectURI)(ダッシュボードに登録必須)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    if !spotify.lastMessage.isEmpty {
+                        Text(spotify.lastMessage)
+                            .font(.caption)
+                            .foregroundStyle(spotify.isLoggedIn ? Color.green : Color.red)
+                    }
+                    if spotify.isLoggedIn {
+                        Text(SpotifyAuth.expiredInText())
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button {
+                        Task { await spotifyClient.performTestLike() }
+                    } label: {
+                        HStack {
+                            if spotifyClient.isBusy {
+                                ProgressView().controlSize(.small)
+                            }
+                            Text("テスト用いいね(再生中の曲を Liked Songs に追加)")
+                        }
+                    }
+                    .disabled(!spotify.isLoggedIn || spotifyClient.isBusy)
+                    if let result = spotifyClient.lastResult {
+                        Text(result.message)
+                            .font(.caption)
+                            .textSelection(.enabled)
                     }
                 }
 
