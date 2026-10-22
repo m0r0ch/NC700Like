@@ -14,7 +14,7 @@ final class SpotifyClient: ObservableObject {
     enum LikeResult: Equatable {
         case saved(String)
         case alreadySaved(String)
-        case nothingPlaying
+        case nothingPlaying(diag: String)
         case notTrack(kind: String)
         case notLoggedIn
         case error(String)
@@ -23,7 +23,7 @@ final class SpotifyClient: ObservableObject {
             switch self {
             case .saved(let title): "いいね追加: \(title)"
             case .alreadySaved(let title): "既にいいね済みのため追加しません: \(title)"
-            case .nothingPlaying: "再生中の曲なし"
+            case .nothingPlaying(let diag): diag.isEmpty ? "再生中の曲なし" : "再生中の曲なし \(diag)"
             case .notTrack(let kind): "曲以外のため保存しません(kind=\(kind))"
             case .notLoggedIn: "Spotify に未ログインです。上のボタンでログインしてください。"
             case .error(let text): "エラー: \(text)"
@@ -52,8 +52,11 @@ final class SpotifyClient: ObservableObject {
     func likeCurrentTrack() async -> LikeResult {
         do {
             guard auth.isLoggedIn else { return .notLoggedIn }
-            guard let item = try await fetchCurrentlyPlaying() else {
-                return .nothingPlaying
+            let (playing, diag) = try await fetchCurrentlyPlaying()
+            guard let item = playing else {
+                // 「再生中の曲なし」は受付キャンセルとは別問題のため原因は推測せず、
+                // 実測値(HTTP ステータス・is_playing・item 有無・押下からの経過)だけを記録する。
+                return .nothingPlaying(diag: diag)
             }
             switch item.itemKind {
             case .other(let kind):
@@ -73,15 +76,38 @@ final class SpotifyClient: ObservableObject {
     }
 
     /// GET /me/player/currently-playing。204 は再生なし(nil)。
-    private func fetchCurrentlyPlaying() async throws -> SpotifyCurrentlyPlaying? {
+    /// 第2戻り値は診断文字列(発生時の実測値を報告文字列に載せる。原因の推測はしない)。
+    private func fetchCurrentlyPlaying() async throws -> (SpotifyCurrentlyPlaying?, diag: String) {
         guard let components = URLComponents(string: "\(Self.apiBase)/me/player/currently-playing") else {
             throw SpotifyAuthError.configuration
         }
+        let requestAt = Date()
         let (status, _, data) = try await spotifyRequest(urlRequest: components)
+        let elapsedText = pressElapsedText(requestStart: requestAt)
         if status == 204 || data.isEmpty {
-            return nil
+            return (nil, diagText(httpStatus: status, isPlaying: "-", item: "-(本文なし)", elapsed: elapsedText))
         }
-        return try SpotifyJSON.decodeCurrentlyPlaying(data)
+        let decoded = try SpotifyJSON.decodeCurrentlyPlaying(data)
+        let isPlayingText = decoded.map { $0.isPlaying ? "true" : "false" } ?? "?(JSONでない)"
+        let itemText: String
+        switch decoded?.itemKind {
+        case .other(let kind): itemText = "あり(kind=\(kind))"
+        case .track: itemText = "あり(type=track)"
+        case nil: itemText = "なし(itemキー不在)"
+        }
+        return (decoded, diagText(httpStatus: status, isPlaying: isPlayingText, item: itemText, elapsed: elapsedText))
+    }
+
+    /// 診断文字列: HTTP ステータス・is_playing・item 有無・押下からリクエストまでの経過。
+    private func diagText(httpStatus: Int, isPlaying: String, item: String, elapsed: String) -> String {
+        "(診断: HTTP=\(httpStatus) is_playing=\(isPlaying) item=\(item) 押下\(elapsed))"
+    }
+
+    /// 押下検出時刻(BLEService)からリクエスト時刻までの経過("+0.4s" 形式)。押下時刻が取れない場合は "時刻なし"。
+    private func pressElapsedText(requestStart: Date) -> String {
+        guard let pressAt = BLEService.shared.lastPressAt else { return "時刻なし" }
+        let interval = requestStart.timeIntervalSince(pressAt)
+        return String(format: "+%.1fs", interval)
     }
 
     /// GET /me/library/contains?uris=... で既に保存済みか確認(ライブラリの追加順を壊さないため)。

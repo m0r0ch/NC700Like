@@ -38,7 +38,7 @@ final class ButtonEventDetectorTests: XCTestCase {
         var detector = ButtonEventDetector()
         XCTAssertEqual(detector.process(value: idle, at: 0, isInitial: true), .ignored)
         XCTAssertEqual(detector.process(value: pressed, at: 1.0), .press)
-        // 押下発火後約1秒(暫定抑止)内の状態変化(00 06 への戻り含む)は押下扱いしない
+        // 押下発火後 postPressSuppressInterval(定数1か所で管理)内の状態変化(00 06 への戻り含む)は押下扱いしない
         XCTAssertEqual(detector.process(value: idle, at: 1.1), .ignored)
         XCTAssertEqual(detector.process(value: pressed, at: 1.2), .ignored)
         // 押下から約1秒を過ぎた状態変化は、トグルの次段として発火する
