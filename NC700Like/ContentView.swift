@@ -6,14 +6,15 @@ struct ContentView: View {
     @StateObject private var spotify = SpotifyAuth.shared
     @StateObject private var spotifyClient = SpotifyClient.shared
     @StateObject private var likeCoordinator: LikeCoordinator
+    @StateObject private var notifications = NotificationManager.shared
+    @StateObject private var backgroundTasks = BackgroundTaskManager.shared
     @State private var debugHex = DebugPreset.p1.template
     @State private var clientIDInput = ""
     @State private var clientIDInitialized = false
 
     init() {
-        let bleForCoordinator = BLEService.shared
-        _ble = StateObject(wrappedValue: bleForCoordinator)
-        _likeCoordinator = StateObject(wrappedValue: LikeCoordinator(ble: bleForCoordinator))
+        _ble = StateObject(wrappedValue: BLEService.shared)
+        _likeCoordinator = StateObject(wrappedValue: LikeCoordinator.shared)
     }
 
     var body: some View {
@@ -24,6 +25,8 @@ struct ContentView: View {
                 spotifyConnectionSection
 
                 likeSection
+
+                residencySection
 
                 reacquireSection
 
@@ -182,6 +185,17 @@ struct ContentView: View {
             Text("押下 → いいね連携(Phase 3)")
         } footer: {
             Text("ヘッドホンのアシスタントボタンを押すと、直後に P1 で Alexa の受付をキャンセルし、Spotify の再生中の曲を Liked Songs に追加します(押下〜完了の所要を表示)。結果は直近10件。実験モード中は連携を停止します。")
+        }
+    }
+
+    @ViewBuilder
+    private var residencySection: some View {
+        Section("実行環境(Phase 4)") {
+            diagnosticRow("通知許可", value: notifications.authorizationText)
+            diagnosticRow("BG タスク実行中", value: "\(backgroundTasks.activeCount) 件")
+            Text("アプリをバックグラウンドに置いたまま押下を拾い、いいね処理の間だけ UIBackgroundTask で実行時間を確保します。通知はフォアグランド以外で届きます。強制終了はしないでください。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 

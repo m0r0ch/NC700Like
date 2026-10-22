@@ -1,11 +1,13 @@
 import Foundation
+import UIKit
 import NC700LikeKit
 
 /// 押下からいいね処理までを担う(LikeCoordinator)。
 /// - 押下イベントは BLEService.eventHub(.press) から受け取る。
 /// - 処理は直列化。処理中の押下は1件だけキューに入れて集約する。
 /// - P1(受付キャンセル)送信はいいねの HTTP と並行で即座に発火する(E5 実測: 送信後約0.3秒でマイク終了)。
-/// - バックグラウンド実行時間の確保(UIBackgroundTask)は Phase 4。
+/// - Phase 4: いいね処理中は UIBackgroundTask で実行時間を確保し、完了時に解放する。
+///   コーディネータは NC700LikeApp.init() で接続するため、バックグラウンド起動(Cold Start)でも押下を拾う。
 @MainActor
 final class LikeCoordinator: ObservableObject {
     enum Mode: String, CaseIterable, Identifiable {
@@ -33,6 +35,9 @@ final class LikeCoordinator: ObservableObject {
 
     let ble: BLEService
     let spotifyClient: SpotifyClient
+
+    /// App・画面のどちらからも同じインスタンスを使う(Cold Start でのバックグラウンド購読のため)。
+    static let shared = LikeCoordinator(ble: .shared)
 
     @Published var mode: Mode {
         didSet { UserDefaults.standard.set(mode.rawValue, forKey: Self.modeKey) }
@@ -87,11 +92,14 @@ final class LikeCoordinator: ObservableObject {
         }
         guard spotifyClient.auth.isLoggedIn else {
             appendReport(interval: 0, message: "Spotify 未ログイン(いいねせず)")
+            NotificationManager.shared.postLikeResult("Spotify 未ログインのためいいねしませんでした")
             return
         }
+        let backgroundTaskID = BackgroundTaskManager.shared.beginTask(reason: "押下 → いいね処理")
         if cancelReceptionOnPress {
             guard ble.controlTerminalByte() != nil else {
                 appendReport(interval: 0, message: "P1 未送信: 制御パケット未受信({ID} 未確定)")
+                BackgroundTaskManager.shared.endTask(backgroundTaskID)
                 return
             }
             // 受付キャンセルは即送信(.withResponse の完了は待たない)。
@@ -100,16 +108,20 @@ final class LikeCoordinator: ObservableObject {
         if isProcessing {
             hasPendingPress = true
             appendReport(interval: 0, message: "いいね処理中に押下を検出。処理完了後に続行します")
+            BackgroundTaskManager.shared.endTask(backgroundTaskID)
             return
         }
         isProcessing = true
         let started = Date()
-        Task { await runProcessing(startedAt: started) }
+        Task { await runProcessing(startedAt: started, backgroundTaskID: backgroundTaskID) }
     }
 
-    private func runProcessing(startedAt: Date) async {
+    private func runProcessing(startedAt: Date, backgroundTaskID: UIBackgroundTaskIdentifier) async {
         var started = startedAt
-        defer { isProcessing = false }
+        defer {
+            isProcessing = false
+            BackgroundTaskManager.shared.endTask(backgroundTaskID)
+        }
         while true {
             hasPendingPress = false
             let result = await spotifyClient.likeCurrentTrack()
@@ -118,6 +130,7 @@ final class LikeCoordinator: ObservableObject {
                 likeCount += 1
             }
             appendReport(interval: interval, message: result.message)
+            NotificationManager.shared.postLikeResult(result.message)
             if !hasPendingPress {
                 return
             }
