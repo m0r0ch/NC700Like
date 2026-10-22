@@ -78,7 +78,7 @@ public final class PressTimelineRecorder {
         for event in events[pressIndex...] {
             let fromPress = relativeMS(event.date, from: pressStart)
             let fromConnect = relativeMS(event.date, from: connectAt)
-            lines.append("\(fromConnect)ms(押下\(fromPress)ms) \(event.label)")
+            lines += "\n\(fromConnect)ms(押下\(fromPress)ms) \(event.label)"
         }
         return lines.joined(separator: "\n")
     }
