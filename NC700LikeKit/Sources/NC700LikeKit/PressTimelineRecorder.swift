@@ -1,7 +1,10 @@
 import Foundation
 
-/// 押下時系列レコーダ(純粋・時計は注入可能)。
-/// - 接続世代番号、接続時刻、押下起点、書込(連番)と応答(完了/応答候補)、FE03 制御/音声の観測
+/// 接続世代単位の押下時系列レコーダ(純粋・時計は注入可能)。
+/// Step A の記録項目:
+/// - 接続世代番号、接続・購読開始・初期読み取り結果の時刻
+/// - 古い ID かどうか(文字列ラベルで入れる)、押下検出、P1 書込と使用 ID、書込完了、
+///   FE03 全通知、再送判定の結果(理由付き)
 /// - 時刻は「接続からの経過 ms」と「押下からの経過 ms」の両方
 /// 「時系列をコピー」は直近の押下起点からの区切り+ヘッダ(接続情報)を出力する。
 public final class PressTimelineRecorder {
@@ -123,14 +126,14 @@ public final class PressTimelineRecorder {
     }
 
     /// 1 回分(直近の押下起点以降+以前の接続情報)の時系列をコピー用テキストにする。
-    public func copyText(deviceName: String?, connectionRoute: String?, terminalAtPress: String?) -> String {
+    public func copyText(deviceName: String?, connectionRoute: String?, idEstablishedAtPress: Bool?) -> String {
         guard let pressStart = pressAt else {
-            return header(deviceName: deviceName, connectionRoute: connectionRoute, terminalAtPress: terminalAtPress, hasPress: false)
+            return header(deviceName: deviceName, connectionRoute: connectionRoute, idEstablishedAtPress: idEstablishedAtPress, hasPress: false)
                 + "\n(直近の押下なし。押下してから再度コピーしてください)"
         }
         // 直近押より前のイベントは接続世代情報として最新の connect に関連するものだけ残す。
         let pressIndex = events.firstIndex { $0.date >= pressStart } ?? events.count
-        var lines = header(deviceName: deviceName, connectionRoute: connectionRoute, terminalAtPress: terminalAtPress, hasPress: true)
+        var lines = header(deviceName: deviceName, connectionRoute: connectionRoute, idEstablishedAtPress: idEstablishedAtPress, hasPress: true)
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
         for event in events[pressIndex...] {
@@ -180,7 +183,7 @@ public final class PressTimelineRecorder {
         return result
     }
 
-    private func header(deviceName: String?, connectionRoute: String?, terminalAtPress: String?, hasPress: Bool) -> String {
+    private func header(deviceName: String?, connectionRoute: String?, idEstablishedAtPress: Bool?, hasPress: Bool) -> String {
         var lines: [String] = []
         lines.append("### 時系列(1 押下分)")
         lines.append("生成日時: \(Self.timestamp(now()))")
@@ -197,10 +200,8 @@ public final class PressTimelineRecorder {
         }
         if let deviceName { lines.append("デバイス: \(deviceName)") }
         if let route = connectionRoute { lines.append("接続経路: \(route)") }
-        if let terminal = terminalAtPress {
-            lines.append("押下時の直近制御terminal: \(terminal)(観測。判定には使わない)")
-        } else {
-            lines.append("押下時の直近制御terminal: なし")
+        if let established = idEstablishedAtPress {
+            lines.append("押下時の{ID}確定: \(established ? "確定済み" : "未確定(古いIDの可能性)")")
         }
         lines.append("形式: 接続+Xms(押下+Yms) ラベル")
         return lines.joined(separator: "\n")

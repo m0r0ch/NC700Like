@@ -82,7 +82,7 @@ struct ContentView: View {
                 UIPasteboard.general.string = ble.timeline.copyText(
                     deviceName: ble.lastDiscoveredName ?? "Bose NC 700",
                     connectionRoute: ble.connectionRoute,
-                    terminalAtPress: ble.lastControlTerminalHex
+                    idEstablishedAtPress: ble.isControlIDEstablished
                 )
             }
             HStack {
@@ -94,7 +94,7 @@ struct ContentView: View {
         } header: {
             Text("⚠️ 実機確認チェックリスト(まずここ見てください)")
         } footer: {
-            Text("時系列コピーには 接続/押下/書込/FE03 制御パケット/切断 の経過ミリ秒付き記録が入ります。追加の報告: いいね連携セクションの結果行(押下→音声停止の実験ログ)・BLE ログ(ログセクションのコピー)。")
+            Text("各方式を切り替えてこの手順を 3 回ずつ試してください。時系列コピーには 接続/押下/書込({ID})/FE03 制御パケット/切断 の経過ミリ秒付き記録が入ります。追加の報告: 現在の「連携方式」名・いいね連携セクションの結果行・BLE ログ(ログセクションのコピー)。")
         }
     }
 
@@ -197,7 +197,14 @@ struct ContentView: View {
                 }
             }
             .pickerStyle(.menu)
-            Toggle("押下直後に P3 で受付をキャンセル", isOn: $likeCoordinator.cancelReceptionOnPress)
+            Toggle("押下直後に P1 で受付をキャンセル", isOn: $likeCoordinator.cancelReceptionOnPress)
+            Picker("再送方式", selection: $likeCoordinator.strategy) {
+                ForEach(LikeCoordinator.CancelStrategy.allCases) { strategy in
+                    Text(strategy.rawValue).tag(strategy)
+                }
+            }
+            .pickerStyle(.menu)
+            .disabled(!likeCoordinator.cancelReceptionOnPress)
             HStack {
                 Text("いいね済み(本アプリ経由)")
                 Spacer()
