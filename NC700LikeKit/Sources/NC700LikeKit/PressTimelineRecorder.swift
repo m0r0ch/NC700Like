@@ -75,10 +75,12 @@ public final class PressTimelineRecorder {
         // 直近押より前のイベントは接続世代情報として最新の connect に関連するものだけ残す。
         let pressIndex = events.firstIndex { $0.date >= pressStart } ?? events.count
         var lines = header(deviceName: deviceName, connectionRoute: connectionRoute, idEstablishedAtPress: idEstablishedAtPress, hasPress: true)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
         for event in events[pressIndex...] {
             let fromPress = relativeMS(event.date, from: pressStart)
             let fromConnect = relativeMS(event.date, from: connectAt)
-            lines += "\n\(fromConnect)ms(押下\(fromPress)ms) \(event.label)"
+            lines.append("\(fromConnect)ms(押下\(fromPress)ms) \(event.label)")
         }
         return lines.joined(separator: "\n")
     }
