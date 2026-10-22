@@ -99,7 +99,7 @@ final class LikeCoordinator: ObservableObject {
         let savedMode = UserDefaults.standard.string(forKey: Self.modeKey)
         mode = savedMode.flatMap(Mode.init(rawValue:)) ?? .like
         let savedStrategy = UserDefaults.standard.string(forKey: Self.strategyKey)
-        strategy = savedStrategy.flatMap(CancelStrategy.init(rawValue:)) ?? .extended
+        strategy = savedStrategy.flatMap(CancelStrategy.init(rawValue:)) ?? .p3OnStale
         if UserDefaults.standard.object(forKey: Self.cancelSendKey) == nil {
             cancelReceptionOnPress = true
         } else {
