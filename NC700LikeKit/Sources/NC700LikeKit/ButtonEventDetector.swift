@@ -2,9 +2,12 @@ import Foundation
 
 /// FDD2サービスの7B61特性から押下を検出する純粋ロジック。
 ///
-/// 設計書第3章の観測事実:
+/// 設計書第3章の観測事実+実験Aの実測:
 /// - 値は19バイトで、末尾2バイト(index 17,18)だけが変化する。
-/// - 待機時 `00 06`、押下後 `10 0E` で、押すたびに交互に入れ替わる。
+/// - 待機時 `00 06`、押下後 `10 0E` で、**押すたびに交互に入れ替わる(トグル)**。
+///   実験Aで確認済み: 連続4タップ(約2秒間隔)で 10 0E/00 06 が交互に発火し、
+///   3秒押しっぱなしでは1発火。00 06/10 0E は「押し込み/離し」の区別ではない。
+/// - このため発火条件は「既知状態どうしの変化」で、押し込み側だけに限定しない。
 public struct ButtonEventDetector: Sendable {
     public enum Output: Equatable, Sendable {
         /// 押下とみなす変化
@@ -13,8 +16,9 @@ public struct ButtonEventDetector: Sendable {
         case ignored
     }
 
-    /// 押下発火後この秒数以内の 7B61 状態変化は「離した/再状態化」とみなして押下扱いしない。
-    /// 00 06(受付待ち)の意味が確定するまでの暫定抑止(実験A)。
+    /// 押下発火後この秒数以内の 7B61 状態変化は押下として数えない。
+    /// 押下直後に生じる「受付キャンセルに伴う自発的な状態反転(P1/P3 の副作用)」を
+    /// 押下誤発火から守るための抑止。実験Aの結果、トグル意味論が確定したため恒久扱い。
     public static let postPressSuppressInterval: TimeInterval = 1.0
 
     public let configuration: DeviceConfiguration

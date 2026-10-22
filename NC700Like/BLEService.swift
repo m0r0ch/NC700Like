@@ -158,8 +158,8 @@ final class BLEService: NSObject, ObservableObject {
     private var initialFE03ReadAt: Date?
     /// 時系列の書込連番(sendDebug のたびに増える。応答タグ用)。
     private var timelineWriteSeq = 0
-    /// 直近の時系列書込(nil なら応答タグなし)。
-    private var lastTimelineWrite: (seq: Int, date: Date, label: String)?
+    /// 直近の時系列書込(nil なら応答タグなし)。idByte は書込で置換した {ID}(P3 など ID 不要なら nil)。
+    private var lastTimelineWrite: (seq: Int, date: Date, label: String, idByte: UInt8?)?
     /// 前回の 7B61 状態(遷移方向の記録用)。
     private var last7B61StateHex: String?
 
@@ -279,15 +279,28 @@ final class BLEService: NSObject, ObservableObject {
     var latestControl: RecentControl? { recentControls.last }
 
     /// 制御パケット受信時の共同記録({ID}・時系列・確定フラグ・直近キュー)。
-    /// echoTag は直近の書込(連番)への応答候補として付ける説明(nil で非表示)。
-    private func recordControlPacket(_ bytes: [UInt8], hexAll: String, echoTag: String? = nil) {
+    /// echoTag は直近の書込(連番)への応答として付ける説明(nil で非表示)。
+    /// echoSameAsWriteID は「末尾ID=直近書込で使った {ID}」のパケット(P1 のエコー)。
+    /// 実測: 古い ID での P1 へのエコーは受付キャンセルを伴わず、この値を {ID} と
+    /// 確定させると後続の押下でも古い ID を使い続けてしまうため、確定には使わない。
+    private func recordControlPacket(
+        _ bytes: [UInt8],
+        hexAll: String,
+        echoTag: String? = nil,
+        echoSameAsWriteID: Bool = false
+    ) {
         let date = Date()
         guard let terminal = bytes.last else {
             timeline.add("FE03制御(\(bytes.count)B terminalなし)")
             return
         }
-        lastControlTerminalHex = String(format: "%02X", terminal)
-        timeline.add("FE03制御(\(bytes.count)B terminal=\(String(format: "%02X", terminal)))\(echoTag.map { " [\($0)]" } ?? "")")
+        let terminalHex = String(format: "%02X", terminal)
+        timeline.add("FE03制御(\(bytes.count)B terminal=\(terminalHex))\(echoTag.map { " [\($0)]" } ?? "")")
+        if echoSameAsWriteID {
+            timeline.add("{ID} は更新しない(直近書込の送信ID=\(terminalHex) と同一のエコー)")
+            return
+        }
+        lastControlTerminalHex = terminalHex
         recentControls.append(RecentControl(date: date, terminal: terminal, hex: hexAll))
         if recentControls.count > 20 {
             recentControls.removeFirst(recentControls.count - 20)
@@ -330,7 +343,7 @@ final class BLEService: NSObject, ObservableObject {
         appendLog(kind: .control, hex: nil, note: "\(trigger) 送信 → \(writeCharacteristic.uuid.uuidString) (\(data.count)B): \(hex)")
         let idText = template.contains("{ID}") ? (idByte.map { String(format: "%02X", $0) } ?? "なし") : "ID不要"
         timelineWriteSeq += 1
-        lastTimelineWrite = (seq: timelineWriteSeq, date: Date(), label: trigger)
+        lastTimelineWrite = (seq: timelineWriteSeq, date: Date(), label: trigger, idByte: idByte)
         timeline.addWrite("\(trigger) (\(data.count)B {ID}=\(idText))", seq: timelineWriteSeq, date: lastTimelineWrite?.date)
         peripheral.writeValue(data, for: writeCharacteristic, type: .withResponse)
     }
@@ -911,10 +924,16 @@ extension BLEService: CBPeripheralDelegate {
             if bytes.count < 64 {
                 let nowDate = Date()
                 var echoTag: String?
+                var echoSameAsWriteID = false
                 if let write = lastTimelineWrite {
                     let lagMs = Int(nowDate.timeIntervalSince(write.date) * 1000)
                     if lagMs >= 0, lagMs < 2000 {
-                        echoTag = "書込#\(write.seq)への応答?\(lagMs)ms"
+                        if let idByte = write.idByte, terminal(of: bytes) == idByte {
+                            echoSameAsWriteID = true
+                            echoTag = "エコー(書込#\(write.seq) +\(lagMs)ms 送信ID同一)"
+                        } else {
+                            echoTag = "応答?(書込#\(write.seq) +\(lagMs)ms)"
+                        }
                     }
                 }
                 if awaitingInitialFE03Report {
@@ -922,7 +941,7 @@ extension BLEService: CBPeripheralDelegate {
                     timeline.add("FE03初期読み取り: 値あり(\([UInt8](data).count)B)")
                 }
                 let hexAll = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
-                recordControlPacket(bytes, hexAll: hexAll, echoTag: echoTag)
+                recordControlPacket(bytes, hexAll: hexAll, echoTag: echoTag, echoSameAsWriteID: echoSameAsWriteID)
                 appendLog(kind: .control, hex: hexAll, note: "FE03制御 \(bytes.count)B (末尾=\(lastControlTerminalHex ?? "-"))")
                 eventHub.emit(BLEEvent(date: Date(), kind: .control, bytes: data))
                 maybeAutoSendOnControl()
@@ -993,5 +1012,10 @@ extension BLEService: CBPeripheralDelegate {
     private func stateHex(of bytes: [UInt8]) -> String {
         guard let state = detector.extractState(from: bytes) else { return "-(短い値)" }
         return state.map { String(format: "%02X", $0) }.joined(separator: " ")
+    }
+
+    /// FE03 制御パケットの末尾 1 バイト(エコー判定に使う)。
+    private func terminal(of bytes: [UInt8]) -> UInt8? {
+        bytes.last
     }
 }
