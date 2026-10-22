@@ -768,6 +768,11 @@ extension BLEService: CBPeripheralDelegate {
         } else if uuid.caseInsensitiveCompare(configuration.audioCharacteristicUUID) == .orderedSame {
             subscribedFE03 = characteristic.isNotifying
             appendLog(kind: .connection, hex: nil, note: "FE03購読: \(characteristic.isNotifying ? "開始" : "停止")")
+            if characteristic.isNotifying {
+                // 電源入れ直し後の再接続では制御パケット({ID} の置換元)が来るまで待つ必要がある。
+                // 購読開始直後に1回読み、直近値が読めれば {ID} を早期に確定させる(Phase 4: 再接続後の即時キャンセル用)。
+                peripheral.readValue(for: characteristic)
+            }
         }
         phase = .subscribed(device: peripheral.name ?? "Bose NC 700")
     }
