@@ -7,7 +7,7 @@ Mac なし(Windows + Sideloadly + GitHub Actions)でビルド・インストー�
 
 - [x] Phase 0: 空のアプリ・CI・IPA 生成
 - [x] Phase 1: BLE 接続と購読(押下検出の実機確認)
-- [ ] Phase 2: Spotify ログインとテスト用いいね
+- [x] Phase 2: Spotify ログインとテスト用いいね(実機確認済み 2026-10-22)
 - [ ] Phase 3: 押下 → いいねの連携
 - [ ] Phase 4: バックグラウンド常駐・自動再接続・通知
 - [ ] Phase 5: 応答時間の計測と短縮・ログ整備
